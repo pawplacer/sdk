@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "paths": {
+      "pawplacer-sdk": ["./src/index.ts"]
+    },
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "examples/**/*"]
+}

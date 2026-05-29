@@ -1,0 +1,67 @@
+{
+  "name": "pawplacer-sdk",
+  "version": "1.4.0",
+  "description": "PawPlacer API SDK for TypeScript/JavaScript",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "check": "npm run typecheck && npm run typecheck:tests && npm run typecheck:examples && npm test && npm run build",
+    "dev": "tsup --watch",
+    "pack:dry-run": "npm pack --dry-run",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run check",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
+    "typecheck:examples": "tsc --noEmit -p tsconfig.examples.json"
+  },
+  "keywords": [
+    "pawplacer",
+    "animals",
+    "pets",
+    "shelter",
+    "adoption"
+  ],
+  "author": "PawPlacer",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pawplacer/sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pawplacer/sdk/issues"
+  },
+  "homepage": "https://github.com/pawplacer/sdk#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ky": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
