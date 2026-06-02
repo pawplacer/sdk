@@ -378,21 +378,104 @@ Deprecated aliases:
 
 ---
 
-## Next.js
+## Setup References
+
+### Node + TypeScript
+
+```typescript
+import { PawPlacerClient } from "pawplacer-sdk";
+
+export const pawplacer = new PawPlacerClient({
+  cache: { enabled: true, refreshFrequencyMinutes: 180 },
+});
+
+export async function getAvailablePets() {
+  return pawplacer.pets.list({ status: "available", limit: 12 });
+}
+```
+
+### Next.js App Router
 
 ```typescript
 // app/api/pets/route.ts
 import { PawPlacerClient } from "pawplacer-sdk";
 
-const client = new PawPlacerClient({});
+const pawplacer = new PawPlacerClient({
+  cache: { enabled: true, refreshFrequencyMinutes: 60 },
+});
 
-export async function GET() {
-  const pets = await client.pets.list({ status: "available", limit: 12 });
-  return Response.json(pets);
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const species = url.searchParams.get("species") ?? undefined;
+  const result = await pawplacer.pets.list({
+    status: "available",
+    species,
+    limit: 12,
+  });
+
+  return Response.json({
+    pets: result.data,
+    total: result.total,
+    hasMore: result.hasMore,
+  });
 }
 ```
 
-Keep the SDK in API routes, server actions, or `getServerSideProps`. Never use it in client components.
+Keep the SDK in API routes, server actions, server components, or `getServerSideProps`. Never use it in client components.
+
+### React + Vite
+
+```typescript
+// server/api/pets.ts
+import { PawPlacerClient } from "pawplacer-sdk";
+
+const pawplacer = new PawPlacerClient();
+
+export async function getAvailablePetsForReact(species?: string) {
+  const result = await pawplacer.pets.list({
+    status: "available",
+    species,
+    limit: 12,
+  });
+
+  return {
+    pets: result.data,
+    total: result.total,
+    hasMore: result.hasMore,
+  };
+}
+```
+
+```typescript
+// src/api/pets.ts
+export async function fetchAvailablePets(species?: string) {
+  const params = new URLSearchParams();
+  if (species) params.set("species", species);
+
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`/api/pets${suffix}`);
+  if (!response.ok) throw new Error(`Failed to load pets: ${response.status}`);
+  return response.json();
+}
+```
+
+React apps should fetch from your own backend route. The SDK and `PAWPLACER_API_KEY` stay on the server.
+
+### CommonJS
+
+```javascript
+const { PawPlacerClient } = require("pawplacer-sdk");
+
+const pawplacer = new PawPlacerClient({
+  cache: { enabled: true, refreshFrequencyMinutes: 180 },
+});
+
+async function getAvailablePets() {
+  return pawplacer.pets.list({ status: "available", limit: 12 });
+}
+
+module.exports = { getAvailablePets, pawplacer };
+```
 
 ---
 
@@ -412,32 +495,13 @@ All types are exported directly:
 
 ---
 
-## CommonJS
-
-```javascript
-const { PawPlacerClient } = require("pawplacer-sdk");
-
-const client = new PawPlacerClient();
-
-async function main() {
-  const pets = await client.pets.list({ status: "available" });
-  const adopters = await client.people.list({ type: "adopter" });
-
-  console.log({ pets: pets.total, adopters: adopters.total });
-}
-
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
----
-
 ## Examples
 
-- [`examples/basic-usage.ts`](./examples/basic-usage.ts): Node/TypeScript usage across pets, people, adoption fees, and contracts. Create examples only run when `PAWPLACER_EXAMPLE_WRITES=true`.
-- [`examples/next-app-router.ts`](./examples/next-app-router.ts): Next.js App Router server-only usage.
+- [`examples/basic-usage.ts`](./examples/basic-usage.ts): Node/TypeScript reference functions for reads, writes, idempotency keys, and errors.
+- [`examples/next-app-router.ts`](./examples/next-app-router.ts): Next.js App Router route handler and server action references.
+- [`examples/react-vite-server-reference.ts`](./examples/react-vite-server-reference.ts): React/Vite server API reference.
+- [`examples/react-vite-client-reference.ts`](./examples/react-vite-client-reference.ts): React/Vite browser fetch helper reference.
+- [`examples/commonjs-reference.cjs`](./examples/commonjs-reference.cjs): CommonJS reference functions with module exports.
 
 ---
 

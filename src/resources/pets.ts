@@ -1,5 +1,13 @@
 import { throwIfApiError } from "../errors";
-import { buildSearchParams, requireId } from "../internal";
+import {
+  assignPresentFields,
+  buildSearchParams,
+  optionalRecord,
+  optionalString,
+  optionalStringArray,
+  requireId,
+  requireString,
+} from "../internal";
 import type { JsonRecord } from "../internal";
 import type { RequestManager } from "../request-manager";
 import type {
@@ -23,83 +31,40 @@ export class PetsApi {
   private normalizeCreatePayload(
     data: PetCreateInput,
   ): Record<string, unknown> {
-    const normalizeRequired = (
-      value: unknown,
-      fieldName: string,
-      hint?: string,
-    ) => {
-      const suffix = hint ? `: ${hint}` : "";
-      if (typeof value !== "string") {
-        throw new Error(`Pet ${fieldName} is required${suffix}`);
-      }
-      const trimmed = value.trim();
-      if (trimmed.length === 0) {
-        throw new Error(`Pet ${fieldName} is required${suffix}`);
-      }
-      return trimmed;
-    };
-    const normalizeArray = (
-      values: string[] | undefined,
-      fieldName: string,
-    ) => {
-      if (values === undefined) {
-        return undefined;
-      }
-      if (!Array.isArray(values)) {
-        throw new Error(`Pet ${fieldName} must be an array of strings`);
-      }
-      return values
-        .map((value) => {
-          if (typeof value !== "string") {
-            throw new Error(`Pet ${fieldName} must be an array of strings`);
-          }
-          return value.trim();
-        })
-        .filter((value) => value.length > 0);
-    };
-    const normalizeRecord = (
-      value: Record<string, unknown> | undefined,
-      fieldName: string,
-    ) => {
-      if (value === undefined) {
-        return undefined;
-      }
-      if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw new Error(`Pet ${fieldName} must be an object`);
-      }
-      return value;
-    };
-
     const payload: Record<string, unknown> = {
-      name: normalizeRequired(data.name, "name"),
-      species: normalizeRequired(
+      name: requireString(data.name, "Pet", "name"),
+      species: requireString(
         data.species,
+        "Pet",
         "species",
         "dog, cat, or rabbit",
       ),
-      age_category: normalizeRequired(
+      age_category: requireString(
         data.age_category,
+        "Pet",
         "age_category",
         "youngest, young, adult, or senior",
       ),
-      sex: normalizeRequired(data.sex, "sex", "male, female, or unknown"),
-      size: normalizeRequired(
+      sex: requireString(data.sex, "Pet", "sex", "male, female, or unknown"),
+      size: requireString(
         data.size,
+        "Pet",
         "size",
         "xSmall, small, medium, large, or xLarge",
       ),
-      status: normalizeRequired(data.status, "status"),
-      health: normalizeRequired(
+      status: requireString(data.status, "Pet", "status"),
+      health: requireString(
         data.health,
+        "Pet",
         "health",
         "unknown, poor, good, or great",
       ),
     };
 
-    const breed = normalizeArray(data.breed ?? data.breeds, "breed");
+    const breed = optionalStringArray(data.breed ?? data.breeds, "Pet", "breed");
     if (breed) payload.breed = breed;
 
-    const color = normalizeArray(data.color ?? data.colors, "color");
+    const color = optionalStringArray(data.color ?? data.colors, "Pet", "color");
     if (color) payload.color = color;
 
     if (data.adoption_fee !== undefined) {
@@ -119,46 +84,64 @@ export class PetsApi {
       }
     }
 
-    const optionalFields: Record<string, unknown> = {
-      age_years: data.age_years?.trim(),
-      age_months: data.age_months?.trim(),
-      age_birthday: data.age_birthday?.trim(),
-      description: data.description?.trim(),
+    assignPresentFields(payload, {
+      age_years: optionalString(data.age_years, "Pet", "age_years"),
+      age_months: optionalString(data.age_months, "Pet", "age_months"),
+      age_birthday: optionalString(data.age_birthday, "Pet", "age_birthday"),
+      description: optionalString(data.description, "Pet", "description"),
       spayed: data.spayed,
-      microchip_id: data.microchip_id?.trim(),
-      good_with: normalizeArray(data.good_with, "good_with"),
-      bad_with: normalizeArray(data.bad_with, "bad_with"),
-      temperaments: normalizeArray(data.temperaments, "temperaments"),
-      image_urls: normalizeArray(data.image_urls, "image_urls"),
-      coat_length: data.coat_length?.trim(),
-      custom_field_data: normalizeRecord(
+      microchip_id: optionalString(data.microchip_id, "Pet", "microchip_id"),
+      good_with: optionalStringArray(data.good_with, "Pet", "good_with"),
+      bad_with: optionalStringArray(data.bad_with, "Pet", "bad_with"),
+      temperaments: optionalStringArray(
+        data.temperaments,
+        "Pet",
+        "temperaments",
+      ),
+      image_urls: optionalStringArray(data.image_urls, "Pet", "image_urls"),
+      coat_length: optionalString(data.coat_length, "Pet", "coat_length"),
+      custom_field_data: optionalRecord(
         data.custom_field_data,
+        "Pet",
         "custom_field_data",
       ),
-      custom_id: data.custom_id?.trim(),
-      custom_status_id: data.custom_status_id?.trim(),
-      intake_date: data.intake_date?.trim(),
-      location_found: data.location_found?.trim(),
-      outcome_date: data.outcome_date?.trim(),
-      primary_veterinarian_id: data.primary_veterinarian_id?.trim(),
-      reason_for_surrender: data.reason_for_surrender?.trim(),
-      special_needs: normalizeArray(data.special_needs, "special_needs"),
-      status_change_notes: data.status_change_notes?.trim(),
-      template_id: data.template_id?.trim(),
+      custom_id: optionalString(data.custom_id, "Pet", "custom_id"),
+      custom_status_id: optionalString(
+        data.custom_status_id,
+        "Pet",
+        "custom_status_id",
+      ),
+      intake_date: optionalString(data.intake_date, "Pet", "intake_date"),
+      location_found: optionalString(
+        data.location_found,
+        "Pet",
+        "location_found",
+      ),
+      outcome_date: optionalString(data.outcome_date, "Pet", "outcome_date"),
+      primary_veterinarian_id: optionalString(
+        data.primary_veterinarian_id,
+        "Pet",
+        "primary_veterinarian_id",
+      ),
+      reason_for_surrender: optionalString(
+        data.reason_for_surrender,
+        "Pet",
+        "reason_for_surrender",
+      ),
+      special_needs: optionalStringArray(
+        data.special_needs,
+        "Pet",
+        "special_needs",
+      ),
+      status_change_notes: optionalString(
+        data.status_change_notes,
+        "Pet",
+        "status_change_notes",
+      ),
+      template_id: optionalString(data.template_id, "Pet", "template_id"),
       show_public: data.show_public ?? data.is_published,
-      weight: data.weight?.trim(),
-    };
-
-    for (const [key, value] of Object.entries(optionalFields)) {
-      if (value === undefined || value === null) continue;
-      if (typeof value === "string") {
-        if (value.trim().length > 0) payload[key] = value.trim();
-      } else if (Array.isArray(value)) {
-        if (value.length > 0) payload[key] = value;
-      } else {
-        payload[key] = value;
-      }
-    }
+      weight: optionalString(data.weight, "Pet", "weight"),
+    });
 
     return payload;
   }

@@ -1,5 +1,13 @@
 import { throwIfApiError } from "../errors";
-import { buildSearchParams, requireId } from "../internal";
+import {
+  assignPresentFields,
+  buildSearchParams,
+  optionalNumber,
+  optionalRecord,
+  optionalString,
+  requireId,
+  requireString,
+} from "../internal";
 import type { JsonRecord } from "../internal";
 import type { RequestManager } from "../request-manager";
 import type {
@@ -32,47 +40,6 @@ function assertPersonType(type: unknown): asserts type is PersonType {
       'Person type is required. Must be "adopter", "foster", "surrender", or "volunteer".',
     );
   }
-}
-
-function normalizeOptionalString(
-  value: string | null | undefined,
-  fieldName: string,
-): string | undefined {
-  if (value == null) {
-    return undefined;
-  }
-  if (typeof value !== "string") {
-    throw new Error(`Person ${fieldName} must be a string`);
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function normalizeOptionalRecord(
-  value: Record<string, unknown> | null | undefined,
-  fieldName: string,
-  label = "Person",
-): Record<string, unknown> | undefined {
-  if (value == null) {
-    return undefined;
-  }
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} ${fieldName} must be an object`);
-  }
-  return value;
-}
-
-function normalizeOptionalNumber(
-  value: number | null | undefined,
-  fieldName: string,
-): number | undefined {
-  if (value == null) {
-    return undefined;
-  }
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`Person ${fieldName} must be a finite number`);
-  }
-  return value;
 }
 
 function surrenderPetCreateOptions(
@@ -113,15 +80,15 @@ function normalizeSurrenderPetLink(
   };
 
   for (const [key, value] of Object.entries(optionalStrings)) {
-    const normalized = normalizeOptionalString(value, key);
+    const normalized = optionalString(value, "Person", key);
     if (normalized !== undefined) payload[key] = normalized;
   }
 
   if (item.custom_data != null) {
-    payload.custom_data = normalizeOptionalRecord(
+    payload.custom_data = optionalRecord(
       item.custom_data,
-      "custom_data",
       "Surrender pet",
+      "custom_data",
     );
   }
 
@@ -255,43 +222,29 @@ export class PeopleApi {
       throw new Error("Create payload is required");
     }
     assertPersonType(data.type);
-    if (typeof data.name !== "string" || data.name.trim().length === 0) {
-      throw new Error("Person name is required");
-    }
 
     const payload: Record<string, unknown> = {
       type: data.type,
-      name: data.name.trim(),
+      name: requireString(data.name, "Person", "name"),
     };
 
-    const optionalStrings: Record<string, string | null | undefined> = {
-      email: data.email,
-      phone: data.phone,
-      address: data.address,
-      status_change_notes: data.status_change_notes,
-    };
-    for (const [key, value] of Object.entries(optionalStrings)) {
-      const normalized = normalizeOptionalString(value, key);
-      if (normalized !== undefined) payload[key] = normalized;
-    }
-
-    const status = normalizeOptionalString(data.status, "status");
-    if (status !== undefined) {
-      payload.status = status;
-    }
-
-    const customFieldData = normalizeOptionalRecord(
-      data.custom_field_data,
-      "custom_field_data",
-    );
-    if (customFieldData !== undefined) {
-      payload.custom_field_data = customFieldData;
-    }
-
-    const capacity = normalizeOptionalNumber(data.capacity, "capacity");
-    if (capacity !== undefined) {
-      payload.capacity = capacity;
-    }
+    assignPresentFields(payload, {
+      email: optionalString(data.email, "Person", "email"),
+      phone: optionalString(data.phone, "Person", "phone"),
+      address: optionalString(data.address, "Person", "address"),
+      status_change_notes: optionalString(
+        data.status_change_notes,
+        "Person",
+        "status_change_notes",
+      ),
+      status: optionalString(data.status, "Person", "status"),
+      custom_field_data: optionalRecord(
+        data.custom_field_data,
+        "Person",
+        "custom_field_data",
+      ),
+      capacity: optionalNumber(data.capacity, "Person", "capacity"),
+    });
     if (data.pets != null && data.type !== "surrender") {
       throw new Error(
         'Person pets can only be provided when type is "surrender"',

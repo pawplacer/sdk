@@ -1,185 +1,146 @@
-import { PawPlacerApiError, PawPlacerClient } from "pawplacer-sdk";
+import {
+  PawPlacerApiError,
+  PawPlacerClient,
+  type PersonCreateInput,
+  type PetCreateInput,
+} from "pawplacer-sdk";
 
-const runWriteExamples = process.env.PAWPLACER_EXAMPLE_WRITES === "true";
-
-function createClient() {
-  const apiKey = process.env.PAWPLACER_API_KEY?.trim();
-  if (!apiKey) {
+export function createPawPlacerClient(apiKey = process.env.PAWPLACER_API_KEY) {
+  const trimmedApiKey = apiKey?.trim();
+  if (!trimmedApiKey) {
     throw new Error(
-      "Set PAWPLACER_API_KEY before running this example. Generate a key in Settings > SDK & API.",
+      "Set PAWPLACER_API_KEY on the server. Generate a key in Settings > SDK & API.",
     );
   }
 
-  return new PawPlacerClient({ apiKey });
+  return new PawPlacerClient({
+    apiKey: trimmedApiKey,
+    cache: { enabled: true, refreshFrequencyMinutes: 180 },
+  });
 }
 
-async function pets(pawplacer: PawPlacerClient) {
-  // List available dogs
+export async function listAvailableDogs(pawplacer: PawPlacerClient) {
   const result = await pawplacer.pets.list({
     status: "available",
     species: "dog",
-    limit: 10,
+    limit: 12,
   });
-  console.log(`Found ${result.total} available dogs`);
 
-  // Fetch a single pet
-  if (result.data.length > 0) {
-    const pet = await pawplacer.pets.get(result.data[0].id);
-    console.log(pet.name, pet.status, pet.global_adoption_fee);
-  }
+  return {
+    pets: result.data,
+    total: result.total,
+    hasMore: result.hasMore,
+    rateLimit: pawplacer.lastResponseMeta.rateLimit,
+  };
+}
 
-  if (runWriteExamples) {
-    // Create a pet
-    const newPet = await pawplacer.pets.create({
-      name: "Max",
-      species: "dog",
-      age_category: "young",
-      sex: "male",
-      size: "medium",
-      status: "available",
-      health: "good",
-      breed: ["Labrador Retriever"],
-      good_with: ["families", "kids"],
-      temperaments: ["playful", "social"],
-      adoption_fee: 250,
-    });
-    console.log("Created:", newPet.id);
-  }
-
-  // Custom fields for pet forms
+export async function loadPetProfile(
+  pawplacer: PawPlacerClient,
+  petId: string,
+) {
+  const pet = await pawplacer.pets.get(petId);
   const fields = await pawplacer.pets.getCustomFields();
-  console.log(
-    "Pet custom fields:",
-    fields.map((f) => f.field_key),
-  );
+
+  return {
+    pet,
+    customFieldKeys: fields.map((field) => field.field_key),
+  };
 }
 
-async function people(pawplacer: PawPlacerClient) {
-  // List active adopters
-  const adopters = await pawplacer.people.list({
-    type: "adopter",
-    status: "active",
-    limit: 25,
+export async function listPeopleByRole(pawplacer: PawPlacerClient) {
+  const [adopters, fosters, volunteers] = await Promise.all([
+    pawplacer.people.list({ type: "adopter", status: "active", limit: 25 }),
+    pawplacer.people.list({ type: "foster", status: "active", limit: 25 }),
+    pawplacer.people.list({
+      type: "volunteer",
+      status: "active",
+      limit: 25,
+    }),
+  ]);
+
+  return {
+    adopters: adopters.data,
+    fosters: fosters.data,
+    volunteers: volunteers.data,
+  };
+}
+
+export async function loadAccountReferenceData(pawplacer: PawPlacerClient) {
+  const [adoptionFees, adopterFields, contract] = await Promise.all([
+    pawplacer.adoptionFees.get(),
+    pawplacer.people.getCustomFields("adopter"),
+    pawplacer.contracts.get("adopter"),
+  ]);
+
+  return {
+    adoptionFees,
+    adopterFieldKeys: adopterFields.map((field) => field.field_key),
+    adoptionContractMarkdown: contract.content,
+  };
+}
+
+export const petCreatePayload = {
+  name: "Max",
+  species: "dog",
+  age_category: "young",
+  sex: "male",
+  size: "medium",
+  status: "available",
+  health: "good",
+  breed: ["Labrador Retriever"],
+  color: ["Black"],
+  good_with: ["families", "kids"],
+  temperaments: ["playful", "social"],
+  adoption_fee: 250,
+} satisfies PetCreateInput;
+
+export async function createPetFromBackendJob(
+  pawplacer: PawPlacerClient,
+  externalPetId: string,
+) {
+  return pawplacer.pets.create(petCreatePayload, {
+    idempotencyKey: `pet-sync:${externalPetId}`,
   });
-  console.log(`Found ${adopters.total} active adopters`);
+}
 
-  // List fosters
-  const fosters = await pawplacer.people.list({ type: "foster" });
-  console.log(`Found ${fosters.total} fosters`);
-
-  // List surrenders
-  const surrenders = await pawplacer.people.list({ type: "surrender" });
-  console.log(`Found ${surrenders.total} surrenders`);
-
-  // List volunteers
-  const volunteers = await pawplacer.people.list({ type: "volunteer" });
-  console.log(`Found ${volunteers.total} volunteers`);
-
-  // Get a single adopter
-  if (adopters.data.length > 0) {
-    const adopter = await pawplacer.people.get(adopters.data[0].id, "adopter");
-    console.log(adopter.name, adopter.email, adopter.capacity);
-  }
-
-  // Custom fields for adopter/foster/surrender/volunteer forms
-  const fields = await pawplacer.people.getCustomFields("adopter");
-  console.log(
-    "Adopter custom fields:",
-    fields.map((f) => f.field_key),
-  );
-
-  if (!runWriteExamples) {
-    return;
-  }
-
-  // Create a foster
-  const foster = await pawplacer.people.create({
-    type: "foster",
-    name: "Jane Smith",
-    email: "jane@example.com",
-    capacity: 3,
-    custom_field_data: { has_yard: true },
-  });
-  console.log("Created foster:", foster.id);
-
-  // Create a surrender intake
-  const surrender = await pawplacer.people.create({
-    type: "surrender",
-    name: "Sam Surrender",
-    email: "sam@example.com",
-    custom_field_data: { reason_for_surrender: "Moving" },
-    pets: [
-      {
-        create: {
-          name: "Buddy",
-          species: "dog",
-          age_category: "adult",
-          sex: "male",
-          size: "large",
-          status: "intake",
-          health: "unknown",
-        },
-        reason: "Moving",
+export const surrenderCreatePayload = {
+  type: "surrender",
+  name: "Sam Surrender",
+  email: "sam@example.com",
+  custom_field_data: { reason_for_surrender: "Moving" },
+  pets: [
+    {
+      create: {
+        name: "Buddy",
+        species: "dog",
+        age_category: "adult",
+        sex: "male",
+        size: "large",
+        status: "intake",
+        health: "unknown",
+        breed: ["Lab Mix"],
       },
-    ],
+      reason: "Moving",
+      urgency: "high",
+    },
+  ],
+} satisfies PersonCreateInput;
+
+export async function createSurrenderIntake(
+  pawplacer: PawPlacerClient,
+  intakeId: string,
+) {
+  return pawplacer.people.create(surrenderCreatePayload, {
+    idempotencyKey: `surrender-intake:${intakeId}`,
   });
-  console.log("Created surrender:", surrender.id);
-
-  // Create a volunteer
-  const volunteer = await pawplacer.people.create({
-    type: "volunteer",
-    name: "Val Volunteer",
-    email: "val@example.com",
-    custom_field_data: { preferred_shift: "Saturday" },
-  });
-  console.log("Created volunteer:", volunteer.id);
 }
 
-async function adoptionFees(pawplacer: PawPlacerClient) {
-  const fees = await pawplacer.adoptionFees.get();
-  console.log(`${fees.length} fee rules configured`);
-  for (const fee of fees) {
-    console.log(
-      `  ${fee.species} ${fee.attribute_type}=${fee.attribute_value}: $${fee.adjustment}`,
-    );
+export function formatPawPlacerError(error: unknown) {
+  if (error instanceof PawPlacerApiError) {
+    return `PawPlacer API error ${error.status}: [${error.code}] ${error.message}`;
   }
-}
-
-async function contracts(pawplacer: PawPlacerClient) {
-  const contract = await pawplacer.contracts.get("adopter");
-  console.log("Adoption contract:", contract.content.slice(0, 100));
-  console.log("Last updated:", contract.updated_at);
-}
-
-async function main() {
-  const pawplacer = createClient();
-
-  try {
-    await pets(pawplacer);
-    await people(pawplacer);
-    await adoptionFees(pawplacer);
-    await contracts(pawplacer);
-
-    // Rate limit info from last request
-    console.log("Rate limit:", pawplacer.lastResponseMeta.rateLimit);
-  } catch (error) {
-    if (error instanceof PawPlacerApiError) {
-      console.error(
-        `API error ${error.status}: [${error.code}] ${error.message}`,
-      );
-    } else {
-      throw error;
-    }
+  if (error instanceof Error) {
+    return error.message;
   }
+  return String(error);
 }
-
-if (!runWriteExamples) {
-  console.log(
-    "Running read-only examples. Set PAWPLACER_EXAMPLE_WRITES=true to run create examples.",
-  );
-}
-
-main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});

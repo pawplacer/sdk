@@ -1,6 +1,6 @@
 {
   "name": "pawplacer-sdk",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "PawPlacer API SDK for TypeScript/JavaScript",
   "sideEffects": false,
   "main": "./dist/index.js",
