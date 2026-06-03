@@ -563,6 +563,118 @@ describe("PetsApi", () => {
     });
   });
 
+  describe("update", () => {
+    it("sends PATCH to api/pets/:id with normalized payload", async () => {
+      requests.patch.mockResolvedValue(
+        createPetResponse({
+          description: "Updated bio",
+          image_urls: ["https://example.com/dog.jpg"],
+          status: "available",
+        }),
+      );
+
+      const result = await pets.update(
+        " pet-1 ",
+        {
+          description: " Updated bio ",
+          image_urls: ["https://example.com/dog.jpg"],
+          show_public: true,
+          status: "available",
+        },
+        { idempotencyKey: "pet-update-1" },
+      );
+
+      expect(requests.patch).toHaveBeenCalledWith("api/pets/pet-1", {
+        json: {
+          description: "Updated bio",
+          image_urls: ["https://example.com/dog.jpg"],
+          show_public: true,
+          status: "available",
+        },
+        headers: { "Idempotency-Key": "pet-update-1" },
+        retry: { methods: ["patch"] },
+      });
+      expect(result.description).toBe("Updated bio");
+    });
+
+    it("allows disabling automatic idempotency headers and PATCH retry", async () => {
+      requests.patch.mockResolvedValue(createPetResponse());
+
+      await pets.update(
+        "pet-1",
+        { description: "Updated" },
+        { idempotencyKey: false },
+      );
+
+      expect(requests.patch).toHaveBeenCalledWith("api/pets/pet-1", {
+        json: { description: "Updated" },
+        headers: {},
+      });
+    });
+
+    it("invalidates list and detail caches after successful update", async () => {
+      requests.patch.mockResolvedValue(createPetResponse());
+
+      await pets.update("pet-1", { status: "pending" });
+
+      expect(requests.invalidateMatching).toHaveBeenCalledWith("pets:list:");
+      expect(requests.invalidate).toHaveBeenCalledWith("pets:get:pet-1");
+    });
+
+    it("updates by custom_id and invalidates the returned canonical pet detail cache", async () => {
+      requests.patch.mockResolvedValue(
+        createPetResponse({ id: "pet-uuid-1", custom_id: "DOG-2026-001" }),
+      );
+
+      const result = await pets.update("DOG-2026-001", {
+        description: "Updated by custom id",
+      });
+
+      expect(requests.patch).toHaveBeenCalledWith(
+        "api/pets/DOG-2026-001",
+        expect.objectContaining({
+          json: { description: "Updated by custom id" },
+        }),
+      );
+      expect(requests.invalidateMatching).toHaveBeenCalledWith("pets:list:");
+      expect(requests.invalidate).toHaveBeenCalledWith("pets:get:pet-uuid-1");
+      expect(requests.invalidate).toHaveBeenCalledWith(
+        "pets:get:DOG-2026-001",
+      );
+      expect(result.id).toBe("pet-uuid-1");
+    });
+
+    it("throws when update payload is null", async () => {
+      await expect(pets.update("pet-1", null as never)).rejects.toThrow(
+        "Update payload is required",
+      );
+    });
+
+    it("throws when update payload normalizes to empty", async () => {
+      await expect(
+        pets.update("pet-1", { description: "  " }),
+      ).rejects.toThrow("Update payload must include at least one field");
+    });
+
+    it("throws when id is empty", async () => {
+      await expect(
+        pets.update("", { description: "Updated" }),
+      ).rejects.toThrow("Pet ID is required and must be a string");
+    });
+
+    it("throws on API validation error", async () => {
+      requests.patch.mockResolvedValue({
+        error: "Pet not found",
+        code: "pet_not_found",
+        request_id: "req-1",
+      });
+
+      await expect(
+        pets.update("missing", { description: "Updated" }),
+      ).rejects.toThrow("Pet not found");
+    });
+  });
+
   describe("findMany", () => {
     it("delegates to list and returns data array", async () => {
       requests.get.mockResolvedValue({

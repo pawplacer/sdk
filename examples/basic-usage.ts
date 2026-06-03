@@ -103,6 +103,25 @@ export async function createPetFromBackendJob(
   });
 }
 
+export async function updatePetFromWebsiteSync(
+  pawplacer: PawPlacerClient,
+  externalPetId: string,
+) {
+  return pawplacer.pets.update(
+    externalPetId,
+    {
+      description: "Updated bio from the website CMS.",
+      status: "available",
+      image_urls: ["https://example.com/max.jpg"],
+      show_public: true,
+      custom_id: externalPetId,
+    },
+    {
+      idempotencyKey: `pet-sync:${externalPetId}:update`,
+    },
+  );
+}
+
 export const surrenderCreatePayload = {
   type: "surrender",
   name: "Sam Surrender",

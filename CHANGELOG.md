@@ -5,6 +5,16 @@ All notable changes to `pawplacer-sdk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-06-12
+
+### Changed
+
+- `people.create` now types create-time `status` as `PersonCreateStatus` (`pending`, `active`, `training`, or `inactive`) and no longer accepts `status_change_notes`; admin review states remain controlled by the PawPlacer API. This was already being stripped in the rpc, so this is effectively a non-change.
+
+### Added
+
+- `pets.update(idOrCustomId, payload, options?)` for partial pet updates through `PATCH /api/pets/{idOrCustomId}`.
+
 ## [1.4.0] - 2026-05-31
 
 ### Added

@@ -245,6 +245,7 @@ export type PersonStatus =
   | "denied"
   | "suspended"
   | "blocked";
+export type PersonCreateStatus = "pending" | "active" | "training" | "inactive";
 
 /**
  * Person (adopter, foster, surrender, or volunteer) object returned by the API.
@@ -271,8 +272,7 @@ export interface PersonCreateInput {
   email?: string | null;
   phone?: string | null;
   address?: string | null;
-  status?: PersonStatus | (string & {});
-  status_change_notes?: string | null;
+  status?: PersonCreateStatus;
   custom_field_data?: Record<string, unknown>;
   capacity?: number | null;
   /** Surrender-only pet links to attach to the surrender record. */

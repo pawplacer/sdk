@@ -232,11 +232,6 @@ export class PeopleApi {
       email: optionalString(data.email, "Person", "email"),
       phone: optionalString(data.phone, "Person", "phone"),
       address: optionalString(data.address, "Person", "address"),
-      status_change_notes: optionalString(
-        data.status_change_notes,
-        "Person",
-        "status_change_notes",
-      ),
       status: optionalString(data.status, "Person", "status"),
       custom_field_data: optionalRecord(
         data.custom_field_data,

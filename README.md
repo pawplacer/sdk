@@ -68,6 +68,18 @@ const pet = await pawplacer.pets.create({
 
 All fields above are required. Optional: `breed`, `color`, `description`, `adoption_fee`, `good_with`, `temperaments`, `image_urls`, `custom_field_data`, and more.
 
+### Update a pet
+
+```typescript
+const updated = await pawplacer.pets.update("DOG-2026-001", {
+  description: "Updated bio",
+  status: "available",
+  image_urls: ["https://example.com/max.jpg"],
+});
+```
+
+Updates accept either the PawPlacer pet UUID or an assigned `custom_id`, and the payload can include only the fields that changed. Pass a stable idempotency key as the third argument for retry-safe sync jobs.
+
 ### Custom fields
 
 ```typescript
@@ -117,7 +129,8 @@ const adopter = await pawplacer.people.create({
 });
 ```
 
-Only `type` and `name` are required. Optional: `email`, `phone`, `address`, `status`, `status_change_notes`, `custom_field_data`, `capacity`.
+Only `type` and `name` are required. Optional: `email`, `phone`, `address`, `status`, `custom_field_data`, `capacity`.
+Create status accepts `pending`, `active`, `training`, or `inactive`; admin review states such as `denied`, `suspended`, and `blocked` are controlled in PawPlacer.
 
 ```typescript
 const surrender = await pawplacer.people.create({
@@ -198,24 +211,25 @@ Valid types: `"adopter"`, `"foster"`, `"volunteer"`, `"surrender"`.
 
 ## API Surface
 
-| Method                            | HTTP                                         |
-| --------------------------------- | -------------------------------------------- |
-| `pets.list(params?)`              | `GET /api/pets`                              |
-| `pets.get(id)`                    | `GET /api/pets/{id}`                         |
-| `pets.getById(id)`                | `GET /api/pets/{id}`                         |
-| `pets.findMany(params?, limit?)`  | `GET /api/pets` (returns `Pet[]`)            |
-| `pets.search(query)`              | `GET /api/pets` (returns `Pet[]`)            |
-| `pets.getByStatus(status)`        | `GET /api/pets` (returns `Pet[]`)            |
-| `pets.getCustomFields()`          | `GET /api/pets/custom-fields`                |
-| `pets.create(payload)`            | `POST /api/pets`                             |
-| `people.list(params)`             | `GET /api/people?type=`                      |
-| `people.get(id, type)`            | `GET /api/people/{id}?type=`                 |
-| `people.getById(id, type)`        | `GET /api/people/{id}?type=`                 |
-| `people.findMany(params, limit?)` | `GET /api/people?type=` (returns `Person[]`) |
-| `people.create(payload)`          | `POST /api/people`                           |
-| `people.getCustomFields(type)`    | `GET /api/people/custom-fields?type=`        |
-| `adoptionFees.get()`              | `GET /api/adoption-fees`                     |
-| `contracts.get(type)`             | `GET /api/contracts?type=`                   |
+| Method                              | HTTP                                         |
+| ----------------------------------- | -------------------------------------------- |
+| `pets.list(params?)`                | `GET /api/pets`                              |
+| `pets.get(id)`                      | `GET /api/pets/{id}`                         |
+| `pets.getById(id)`                  | `GET /api/pets/{id}`                         |
+| `pets.findMany(params?, limit?)`    | `GET /api/pets` (returns `Pet[]`)            |
+| `pets.search(query)`                | `GET /api/pets` (returns `Pet[]`)            |
+| `pets.getByStatus(status)`          | `GET /api/pets` (returns `Pet[]`)            |
+| `pets.getCustomFields()`            | `GET /api/pets/custom-fields`                |
+| `pets.create(payload)`              | `POST /api/pets`                             |
+| `pets.update(idOrCustomId, payload)` | `PATCH /api/pets/{idOrCustomId}`             |
+| `people.list(params)`               | `GET /api/people?type=`                      |
+| `people.get(id, type)`              | `GET /api/people/{id}?type=`                 |
+| `people.getById(id, type)`          | `GET /api/people/{id}?type=`                 |
+| `people.findMany(params, limit?)`   | `GET /api/people?type=` (returns `Person[]`) |
+| `people.create(payload)`            | `POST /api/people`                           |
+| `people.getCustomFields(type)`      | `GET /api/people/custom-fields?type=`        |
+| `adoptionFees.get()`                | `GET /api/adoption-fees`                     |
+| `contracts.get(type)`               | `GET /api/contracts?type=`                   |
 
 ---
 

@@ -14,7 +14,9 @@ export function createMockRequestManager() {
     stats: vi.fn(),
   } as unknown as RequestManager & {
     get: ReturnType<typeof vi.fn>;
+    patch: ReturnType<typeof vi.fn>;
     post: ReturnType<typeof vi.fn>;
+    invalidate: ReturnType<typeof vi.fn>;
     invalidateMatching: ReturnType<typeof vi.fn>;
   };
 }

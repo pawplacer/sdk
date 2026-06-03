@@ -502,7 +502,6 @@ describe("PeopleApi", () => {
         phone: "555-0200",
         address: "456 Oak Ave",
         status: "active",
-        status_change_notes: "Approved",
         custom_field_data: { dog_experience: "yes" },
         capacity: 2,
       });
@@ -515,27 +514,9 @@ describe("PeopleApi", () => {
       expect(options.json.phone).toBe("555-0200");
       expect(options.json.address).toBe("456 Oak Ave");
       expect(options.json.status).toBe("active");
-      expect(options.json.status_change_notes).toBe("Approved");
+      expect(options.json.status_change_notes).toBeUndefined();
       expect(options.json.custom_field_data).toEqual({ dog_experience: "yes" });
       expect(options.json.capacity).toBe(2);
-    });
-
-    it("trims optional status before sending", async () => {
-      requests.post.mockResolvedValue(
-        createPersonResponse({ id: "new-person" }),
-      );
-
-      await people.create({
-        type: "adopter",
-        name: "Alice",
-        status: "  active  ",
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.status).toBe("active");
     });
 
     it("creates surrender records with the same people endpoint", async () => {

@@ -28,38 +28,57 @@ import { applyPostOptions } from "./_post-options";
 export class PetsApi {
   constructor(private requests: RequestManager) {}
 
-  private normalizeCreatePayload(
-    data: PetCreateInput,
+  private normalizePetWritePayload(
+    data: Partial<PetCreateInput>,
+    options: { requireCreateFields: boolean },
   ): Record<string, unknown> {
-    const payload: Record<string, unknown> = {
-      name: requireString(data.name, "Pet", "name"),
-      species: requireString(
-        data.species,
-        "Pet",
-        "species",
-        "dog, cat, or rabbit",
-      ),
-      age_category: requireString(
-        data.age_category,
-        "Pet",
-        "age_category",
-        "youngest, young, adult, or senior",
-      ),
-      sex: requireString(data.sex, "Pet", "sex", "male, female, or unknown"),
-      size: requireString(
-        data.size,
-        "Pet",
-        "size",
-        "xSmall, small, medium, large, or xLarge",
-      ),
-      status: requireString(data.status, "Pet", "status"),
-      health: requireString(
-        data.health,
-        "Pet",
-        "health",
-        "unknown, poor, good, or great",
-      ),
-    };
+    const payload: Record<string, unknown> = {};
+
+    if (options.requireCreateFields) {
+      Object.assign(payload, {
+        name: requireString(data.name, "Pet", "name"),
+        species: requireString(
+          data.species,
+          "Pet",
+          "species",
+          "dog, cat, or rabbit",
+        ),
+        age_category: requireString(
+          data.age_category,
+          "Pet",
+          "age_category",
+          "youngest, young, adult, or senior",
+        ),
+        sex: requireString(data.sex, "Pet", "sex", "male, female, or unknown"),
+        size: requireString(
+          data.size,
+          "Pet",
+          "size",
+          "xSmall, small, medium, large, or xLarge",
+        ),
+        status: requireString(data.status, "Pet", "status"),
+        health: requireString(
+          data.health,
+          "Pet",
+          "health",
+          "unknown, poor, good, or great",
+        ),
+      });
+    } else {
+      assignPresentFields(payload, {
+        name: optionalString(data.name, "Pet", "name"),
+        species: optionalString(data.species, "Pet", "species"),
+        age_category: optionalString(
+          data.age_category,
+          "Pet",
+          "age_category",
+        ),
+        sex: optionalString(data.sex, "Pet", "sex"),
+        size: optionalString(data.size, "Pet", "size"),
+        status: optionalString(data.status, "Pet", "status"),
+        health: optionalString(data.health, "Pet", "health"),
+      });
+    }
 
     const breed = optionalStringArray(data.breed ?? data.breeds, "Pet", "breed");
     if (breed) payload.breed = breed;
@@ -146,6 +165,24 @@ export class PetsApi {
     return payload;
   }
 
+  private normalizeCreatePayload(
+    data: PetCreateInput,
+  ): Record<string, unknown> {
+    return this.normalizePetWritePayload(data, { requireCreateFields: true });
+  }
+
+  private normalizeUpdatePayload(
+    data: Partial<PetCreateInput>,
+  ): Record<string, unknown> {
+    const payload = this.normalizePetWritePayload(data, {
+      requireCreateFields: false,
+    });
+    if (Object.keys(payload).length === 0) {
+      throw new Error("Update payload must include at least one field");
+    }
+    return payload;
+  }
+
   /** List pets with optional filters. Returns paginated results. */
   async list(params?: PetListParams): Promise<PetListResponse> {
     const searchParams = buildSearchParams(params);
@@ -211,6 +248,35 @@ export class PetsApi {
     throwIfApiError(pet);
     this.requests.invalidateMatching("pets:list:");
     return validatePet(pet);
+  }
+
+  /** Update an existing pet by PawPlacer pet UUID or custom_id. Sends an idempotency key by default. */
+  async update(
+    idOrCustomId: string,
+    data: Partial<PetCreateInput>,
+    options?: CreatePetOptions,
+  ): Promise<Pet> {
+    const identifier = requireId(idOrCustomId, "Pet");
+    if (!data || typeof data !== "object") {
+      throw new Error("Update payload is required");
+    }
+    const payload = this.normalizeUpdatePayload(data);
+    const headers: Record<string, string> = {};
+    const requestOptions: Record<string, unknown> = { json: payload, headers };
+    applyPostOptions(headers, requestOptions, options, "patch");
+
+    const pet = await this.requests.patch<JsonRecord>(
+      `api/pets/${encodeURIComponent(identifier)}`,
+      requestOptions,
+    );
+    throwIfApiError(pet);
+    const validatedPet = validatePet(pet);
+    this.requests.invalidateMatching("pets:list:");
+    this.requests.invalidate(`pets:get:${validatedPet.id}`);
+    if (identifier !== validatedPet.id) {
+      this.requests.invalidate(`pets:get:${identifier}`);
+    }
+    return validatedPet;
   }
 
   /** Search pets by name or description. Returns a plain `Pet[]` array. */
