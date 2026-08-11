@@ -24,9 +24,7 @@ export async function fetchAvailablePets(filters: {
   if (filters.species) searchParams.set("species", filters.species);
   if (filters.search) searchParams.set("search", filters.search);
 
-  const suffix = searchParams.toString()
-    ? `?${searchParams.toString()}`
-    : "";
+  const suffix = searchParams.toString() ? `?${searchParams.toString()}` : "";
   const response = await fetch(`/api/pets${suffix}`);
   if (!response.ok) {
     throw new Error(`Failed to load pets: ${response.status}`);

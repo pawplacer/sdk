@@ -15,6 +15,7 @@ import type {
   CreatePersonOptions,
   CustomField,
   Person,
+  PersonApplicationCreateInput,
   PersonCreateInput,
   PersonListParams,
   PersonListResponse,
@@ -28,6 +29,10 @@ import {
 } from "../validation";
 import { applyPostOptions } from "./_post-options";
 import type { PetsApi } from "./pets";
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_APPLICATION_PETS = 5;
 
 function assertPersonType(type: unknown): asserts type is PersonType {
   if (
@@ -153,6 +158,63 @@ async function resolveSurrenderPets(
   return resolved;
 }
 
+function normalizeApplication(
+  application: PersonApplicationCreateInput | null | undefined,
+  type: PersonType,
+  options?: CreatePersonOptions,
+): Record<string, unknown> | undefined {
+  if (application == null) {
+    return undefined;
+  }
+  if (typeof application !== "object" || Array.isArray(application)) {
+    throw new Error("Person application must be an object");
+  }
+  if (type !== "adopter" && type !== "foster") {
+    throw new Error(
+      'Person application can only be provided when type is "adopter" or "foster"',
+    );
+  }
+  if (!Array.isArray(application.pet_ids)) {
+    throw new Error("Person application pet_ids must be an array of UUIDs");
+  }
+
+  const petIds = application.pet_ids.map((petId) => {
+    if (typeof petId !== "string" || !UUID_PATTERN.test(petId.trim())) {
+      throw new Error("Person application pet_ids must be an array of UUIDs");
+    }
+    return petId.trim();
+  });
+
+  if (petIds.length === 0) {
+    throw new Error("Person application must include at least one pet_id");
+  }
+  if (petIds.length > MAX_APPLICATION_PETS) {
+    throw new Error(
+      `Person application cannot include more than ${MAX_APPLICATION_PETS} pet_ids`,
+    );
+  }
+  if (new Set(petIds).size !== petIds.length) {
+    throw new Error("Person application pet_ids must be unique");
+  }
+  if (application.terms_accepted !== true) {
+    throw new Error("Person application terms_accepted must be true");
+  }
+  if (options?.idempotencyKey === false) {
+    throw new Error("Person applications require an idempotency key");
+  }
+  if (
+    typeof options?.idempotencyKey === "string" &&
+    !UUID_PATTERN.test(options.idempotencyKey)
+  ) {
+    throw new Error("Person application idempotencyKey must be a UUID");
+  }
+
+  return {
+    pet_ids: petIds,
+    terms_accepted: true,
+  };
+}
+
 export class PeopleApi {
   constructor(
     private requests: RequestManager,
@@ -240,12 +302,21 @@ export class PeopleApi {
       ),
       capacity: optionalNumber(data.capacity, "Person", "capacity"),
     });
+    if (data.application != null && data.pets != null) {
+      throw new Error(
+        "Person application and surrender pets cannot be provided together",
+      );
+    }
+    const application = normalizeApplication(
+      data.application,
+      data.type,
+      options,
+    );
     if (data.pets != null && data.type !== "surrender") {
       throw new Error(
         'Person pets can only be provided when type is "surrender"',
       );
     }
-
     const surrenderPets = await resolveSurrenderPets(
       this.petsApi,
       data.pets,
@@ -253,6 +324,9 @@ export class PeopleApi {
     );
     if (surrenderPets) {
       payload.pets = surrenderPets;
+    }
+    if (application) {
+      payload.application = application;
     }
 
     const headers: Record<string, string> = {};

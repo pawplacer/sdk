@@ -68,11 +68,7 @@ export class PetsApi {
       assignPresentFields(payload, {
         name: optionalString(data.name, "Pet", "name"),
         species: optionalString(data.species, "Pet", "species"),
-        age_category: optionalString(
-          data.age_category,
-          "Pet",
-          "age_category",
-        ),
+        age_category: optionalString(data.age_category, "Pet", "age_category"),
         sex: optionalString(data.sex, "Pet", "sex"),
         size: optionalString(data.size, "Pet", "size"),
         status: optionalString(data.status, "Pet", "status"),
@@ -80,10 +76,18 @@ export class PetsApi {
       });
     }
 
-    const breed = optionalStringArray(data.breed ?? data.breeds, "Pet", "breed");
+    const breed = optionalStringArray(
+      data.breed ?? data.breeds,
+      "Pet",
+      "breed",
+    );
     if (breed) payload.breed = breed;
 
-    const color = optionalStringArray(data.color ?? data.colors, "Pet", "color");
+    const color = optionalStringArray(
+      data.color ?? data.colors,
+      "Pet",
+      "color",
+    );
     if (color) payload.color = color;
 
     if (data.adoption_fee !== undefined) {
