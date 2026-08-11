@@ -5,6 +5,17 @@ All notable changes to `pawplacer-sdk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-11
+
+### Added
+
+- `people.create` accepts adopter/foster `application` metadata with PawPlacer pet IDs and accepted terms, returning the created application alongside the pending person.
+- Custom-field responses expose stable template, section, order, placeholder, and synced-column metadata for external form renderers.
+
+### Fixed
+
+- Request-layer declarations no longer force CommonJS NodeNext consumers to import the ESM-only `ky` type at runtime.
+
 ## [1.5.0] - 2026-06-12
 
 ### Changed

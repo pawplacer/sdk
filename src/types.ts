@@ -41,8 +41,14 @@ export interface CustomField {
   field_type: string;
   required: boolean;
   help_text?: string | null;
+  placeholder?: string | null;
   options?: unknown;
+  sync_to_column?: string | null;
+  template_id?: string | null;
+  section_id?: string | null;
   section?: string | null;
+  section_order?: number;
+  field_order?: number;
   hidden?: boolean;
   internal_only?: boolean;
 }
@@ -262,8 +268,23 @@ export interface Person {
   custom_field_data: Record<string, unknown>;
   tags: string[];
   capacity: number | null;
+  /** Present when the person was created as an adopter/foster application. */
+  application?: PersonApplication;
   created_at: string;
   updated_at: string;
+}
+
+export interface PersonApplication {
+  id: string;
+  pet_ids: string[];
+  submitted_at: string;
+}
+
+export interface PersonApplicationCreateInput {
+  /** PawPlacer pet UUIDs selected for this application (1-5, unique). */
+  pet_ids: string[];
+  /** Must be true after the caller renders and obtains acceptance of the contract. */
+  terms_accepted: true;
 }
 
 export interface PersonCreateInput {
@@ -275,6 +296,8 @@ export interface PersonCreateInput {
   status?: PersonCreateStatus;
   custom_field_data?: Record<string, unknown>;
   capacity?: number | null;
+  /** Adopter/foster-only application metadata. Creates the pending person and application atomically. */
+  application?: PersonApplicationCreateInput;
   /** Surrender-only pet links to attach to the surrender record. */
   pets?: SurrenderPetCreateInput[];
 }

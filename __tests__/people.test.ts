@@ -519,6 +519,217 @@ describe("PeopleApi", () => {
       expect(options.json.capacity).toBe(2);
     });
 
+    it("submits an adopter application with accepted terms and pet IDs", async () => {
+      const petId = "550e8400-e29b-41d4-a716-446655440001";
+      const submissionId = "550e8400-e29b-41d4-a716-446655440002";
+      requests.post.mockResolvedValue(
+        createPersonResponse({
+          application: {
+            id: "550e8400-e29b-41d4-a716-446655440003",
+            pet_ids: [petId],
+            submitted_at: "2026-08-11T12:00:00.000Z",
+          },
+          id: submissionId,
+          status: "pending",
+        }),
+      );
+
+      const result = await people.create(
+        {
+          application: {
+            pet_ids: [petId],
+            terms_accepted: true,
+          },
+          custom_field_data: { housing_type: "house" },
+          name: "Alice Adopter",
+          type: "adopter",
+        },
+        { idempotencyKey: submissionId },
+      );
+
+      const [, options] = requests.post.mock.calls[0] as [
+        string,
+        { headers: Record<string, string>; json: Record<string, unknown> },
+      ];
+      expect(options.headers["Idempotency-Key"]).toBe(submissionId);
+      expect(options.json.application).toEqual({
+        pet_ids: [petId],
+        terms_accepted: true,
+      });
+      expect(result.status).toBe("pending");
+      expect(result.application).toEqual({
+        id: "550e8400-e29b-41d4-a716-446655440003",
+        pet_ids: [petId],
+        submitted_at: "2026-08-11T12:00:00.000Z",
+      });
+    });
+
+    it("generates the UUID idempotency key required by applications", async () => {
+      requests.post.mockResolvedValue(createPersonResponse());
+
+      await people.create({
+        application: {
+          pet_ids: ["550e8400-e29b-41d4-a716-446655440001"],
+          terms_accepted: true,
+        },
+        name: "Alice Adopter",
+        type: "adopter",
+      });
+
+      const [, options] = requests.post.mock.calls[0] as [
+        string,
+        { headers: Record<string, string> },
+      ];
+      expect(options.headers["Idempotency-Key"]).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      );
+    });
+
+    it("supports foster applications", async () => {
+      const petId = "550e8400-e29b-41d4-a716-446655440001";
+      requests.post.mockResolvedValue(createPersonResponse({ type: "foster" }));
+
+      const result = await people.create({
+        application: {
+          pet_ids: [petId],
+          terms_accepted: true,
+        },
+        name: "Fran Foster",
+        type: "foster",
+      });
+
+      const [, options] = requests.post.mock.calls[0] as [
+        string,
+        { json: Record<string, unknown> },
+      ];
+      expect(options.json.application).toEqual({
+        pet_ids: [petId],
+        terms_accepted: true,
+      });
+      expect(result.type).toBe("foster");
+    });
+
+    it("rejects application payloads outside adopter and foster people", async () => {
+      await expect(
+        people.create({
+          application: {
+            pet_ids: ["550e8400-e29b-41d4-a716-446655440001"],
+            terms_accepted: true,
+          },
+          name: "Val Volunteer",
+          type: "volunteer",
+        }),
+      ).rejects.toThrow(
+        'Person application can only be provided when type is "adopter" or "foster"',
+      );
+      expect(requests.post).not.toHaveBeenCalled();
+    });
+
+    it("validates application terms and pet UUIDs before posting", async () => {
+      await expect(
+        people.create({
+          application: {
+            pet_ids: ["not-a-uuid"],
+            terms_accepted: true,
+          },
+          name: "Alice Adopter",
+          type: "adopter",
+        }),
+      ).rejects.toThrow("Person application pet_ids must be an array of UUIDs");
+
+      await expect(
+        people.create({
+          application: {
+            pet_ids: ["550e8400-e29b-41d4-a716-446655440001"],
+            terms_accepted: false,
+          } as never,
+          name: "Alice Adopter",
+          type: "adopter",
+        }),
+      ).rejects.toThrow("Person application terms_accepted must be true");
+
+      await expect(
+        people.create({
+          application: {
+            pet_ids: [
+              "550e8400-e29b-41d4-a716-446655440001",
+              "550e8400-e29b-41d4-a716-446655440001",
+            ],
+            terms_accepted: true,
+          },
+          name: "Alice Adopter",
+          type: "adopter",
+        }),
+      ).rejects.toThrow("Person application pet_ids must be unique");
+
+      expect(requests.post).not.toHaveBeenCalled();
+    });
+
+    it("enforces application pet limits and input exclusivity", async () => {
+      await expect(
+        people.create({
+          application: { pet_ids: [], terms_accepted: true },
+          name: "Alice Adopter",
+          type: "adopter",
+        }),
+      ).rejects.toThrow("Person application must include at least one pet_id");
+
+      await expect(
+        people.create({
+          application: {
+            pet_ids: [
+              "550e8400-e29b-41d4-a716-446655440001",
+              "550e8400-e29b-41d4-a716-446655440002",
+              "550e8400-e29b-41d4-a716-446655440003",
+              "550e8400-e29b-41d4-a716-446655440004",
+              "550e8400-e29b-41d4-a716-446655440005",
+              "550e8400-e29b-41d4-a716-446655440006",
+            ],
+            terms_accepted: true,
+          },
+          name: "Alice Adopter",
+          type: "adopter",
+        }),
+      ).rejects.toThrow(
+        "Person application cannot include more than 5 pet_ids",
+      );
+
+      await expect(
+        people.create({
+          application: {
+            pet_ids: ["550e8400-e29b-41d4-a716-446655440001"],
+            terms_accepted: true,
+          },
+          name: "Alice Adopter",
+          pets: [{ pet_id: "550e8400-e29b-41d4-a716-446655440002" }],
+          type: "adopter",
+        }),
+      ).rejects.toThrow(
+        "Person application and surrender pets cannot be provided together",
+      );
+
+      expect(requests.post).not.toHaveBeenCalled();
+    });
+
+    it("requires UUID idempotency for applications", async () => {
+      const input = {
+        application: {
+          pet_ids: ["550e8400-e29b-41d4-a716-446655440001"],
+          terms_accepted: true as const,
+        },
+        name: "Alice Adopter",
+        type: "adopter" as const,
+      };
+
+      await expect(
+        people.create(input, { idempotencyKey: false }),
+      ).rejects.toThrow("Person applications require an idempotency key");
+      await expect(
+        people.create(input, { idempotencyKey: "application-1" }),
+      ).rejects.toThrow("Person application idempotencyKey must be a UUID");
+      expect(requests.post).not.toHaveBeenCalled();
+    });
+
     it("creates surrender records with the same people endpoint", async () => {
       requests.post.mockResolvedValue(
         createPersonResponse({
@@ -960,6 +1171,13 @@ describe("PeopleApi", () => {
             label: "Previous Pets",
             field_type: "text",
             required: false,
+            placeholder: "Tell us about your pets",
+            sync_to_column: null,
+            template_id: "550e8400-e29b-41d4-a716-446655440010",
+            section_id: "550e8400-e29b-41d4-a716-446655440011",
+            section: "Experience",
+            section_order: 2,
+            field_order: 3,
             hidden: false,
             internal_only: true,
           },
@@ -983,6 +1201,10 @@ describe("PeopleApi", () => {
       expect(result[0]!.field_key).toBe("prev_pets");
       expect(result[0]!.hidden).toBe(false);
       expect(result[0]!.internal_only).toBe(true);
+      expect(result[0]!.section).toBe("Experience");
+      expect(result[0]!.section_order).toBe(2);
+      expect(result[0]!.field_order).toBe(3);
+      expect(result[0]!.placeholder).toBe("Tell us about your pets");
     });
 
     it("uses distinct cache key per type", async () => {
@@ -1115,6 +1337,21 @@ describe("PeopleApi", () => {
       const result = await people.get("person-1", "adopter");
       expect(result.status_change_notes).toBeNull();
       expect(result.capacity).toBeNull();
+    });
+
+    it("rejects malformed application metadata in a person response", async () => {
+      requests.get.mockResolvedValue({
+        ...mockAdopter,
+        application: {
+          id: "application-1",
+          pet_ids: "pet-1",
+          submitted_at: "2026-08-11T12:00:00.000Z",
+        },
+      });
+
+      await expect(people.get("person-1", "adopter")).rejects.toThrow(
+        PawPlacerResponseValidationError,
+      );
     });
   });
 });

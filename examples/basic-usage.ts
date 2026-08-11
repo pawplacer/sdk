@@ -79,6 +79,39 @@ export async function loadAccountReferenceData(pawplacer: PawPlacerClient) {
   };
 }
 
+export async function submitAdoptionApplication(
+  pawplacer: PawPlacerClient,
+  input: {
+    submissionId: string;
+    petId: string;
+    name: string;
+    email: string;
+    phone?: string;
+    answers: Record<string, unknown>;
+  },
+) {
+  // Render the adopter fields and contract returned by
+  // loadAccountReferenceData(), then call this only after the applicant has
+  // accepted the displayed contract.
+  return pawplacer.people.create(
+    {
+      type: "adopter",
+      name: input.name,
+      email: input.email,
+      phone: input.phone,
+      custom_field_data: input.answers,
+      application: {
+        pet_ids: [input.petId],
+        terms_accepted: true,
+      },
+    },
+    {
+      // Keep this UUID stable when retrying the same browser submission.
+      idempotencyKey: input.submissionId,
+    },
+  );
+}
+
 export const petCreatePayload = {
   name: "Max",
   species: "dog",

@@ -1,6 +1,6 @@
 {
   "name": "pawplacer-sdk",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "PawPlacer API SDK for TypeScript/JavaScript",
   "sideEffects": false,
   "main": "./dist/index.js",
@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "check": "npm run typecheck && npm run typecheck:tests && npm run typecheck:examples && npm test && npm run build",
+    "check": "npm run typecheck && npm run typecheck:tests && npm run typecheck:examples && npm test && npm run build && npm run typecheck:consumers",
     "dev": "tsup --watch",
     "pack:dry-run": "npm pack --dry-run",
     "prepack": "npm run build",
@@ -23,6 +23,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "typecheck:consumers": "tsc --noEmit -p tsconfig.consumers.json",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "typecheck:examples": "tsc --noEmit -p tsconfig.examples.json"
   },
@@ -33,7 +34,6 @@
     "shelter",
     "adoption"
   ],
-  "author": "PawPlacer",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -97,6 +97,21 @@ function expectOptionalBoolean(
   return value;
 }
 
+function expectOptionalNumber(
+  record: JsonRecord,
+  key: string,
+  context: string,
+): number | undefined {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    fail(`${context}.${key} must be a finite number or undefined`, record);
+  }
+  return value;
+}
+
 function expectNumber(
   record: JsonRecord,
   key: string,
@@ -229,7 +244,13 @@ function validateCustomField(payload: unknown, context: string): CustomField {
   expectString(field, "field_type", context);
   expectBoolean(field, "required", context);
   expectOptionalNullableString(field, "help_text", context);
+  expectOptionalNullableString(field, "placeholder", context);
+  expectOptionalNullableString(field, "sync_to_column", context);
+  expectOptionalNullableString(field, "template_id", context);
+  expectOptionalNullableString(field, "section_id", context);
   expectOptionalNullableString(field, "section", context);
+  expectOptionalNumber(field, "section_order", context);
+  expectOptionalNumber(field, "field_order", context);
   expectOptionalBoolean(field, "hidden", context);
   expectOptionalBoolean(field, "internal_only", context);
 
@@ -278,6 +299,15 @@ export function validatePerson(payload: unknown, context = "person"): Person {
   expectJsonRecord(person, "custom_field_data", context);
   expectStringArray(person, "tags", context);
   expectNullableNumber(person, "capacity", context);
+  if (person.application !== undefined) {
+    const application = expectRecord(
+      person.application,
+      `${context}.application`,
+    );
+    expectString(application, "id", `${context}.application`);
+    expectStringArray(application, "pet_ids", `${context}.application`);
+    expectString(application, "submitted_at", `${context}.application`);
+  }
   expectString(person, "created_at", context);
   expectString(person, "updated_at", context);
 

@@ -638,9 +638,7 @@ describe("PetsApi", () => {
       );
       expect(requests.invalidateMatching).toHaveBeenCalledWith("pets:list:");
       expect(requests.invalidate).toHaveBeenCalledWith("pets:get:pet-uuid-1");
-      expect(requests.invalidate).toHaveBeenCalledWith(
-        "pets:get:DOG-2026-001",
-      );
+      expect(requests.invalidate).toHaveBeenCalledWith("pets:get:DOG-2026-001");
       expect(result.id).toBe("pet-uuid-1");
     });
 
@@ -651,15 +649,15 @@ describe("PetsApi", () => {
     });
 
     it("throws when update payload normalizes to empty", async () => {
-      await expect(
-        pets.update("pet-1", { description: "  " }),
-      ).rejects.toThrow("Update payload must include at least one field");
+      await expect(pets.update("pet-1", { description: "  " })).rejects.toThrow(
+        "Update payload must include at least one field",
+      );
     });
 
     it("throws when id is empty", async () => {
-      await expect(
-        pets.update("", { description: "Updated" }),
-      ).rejects.toThrow("Pet ID is required and must be a string");
+      await expect(pets.update("", { description: "Updated" })).rejects.toThrow(
+        "Pet ID is required and must be a string",
+      );
     });
 
     it("throws on API validation error", async () => {

@@ -1,7 +1,11 @@
 // Next.js App Router reference.
 // Keep this code in API routes, server actions, or other server-only files.
 
-import { PawPlacerClient, type PetCreateInput } from "pawplacer-sdk";
+import {
+  PawPlacerClient,
+  type PersonCreateInput,
+  type PetCreateInput,
+} from "pawplacer-sdk";
 
 const pawplacer = new PawPlacerClient({
   cache: { enabled: true, refreshFrequencyMinutes: 60 },
@@ -61,4 +65,41 @@ export async function getAdoptionReferenceData() {
     contractMarkdown: contract.content,
     customFields,
   };
+}
+
+// app/adopt/[petId]/actions.ts
+export async function submitAdoptionApplicationAction(
+  input: Pick<
+    PersonCreateInput,
+    "name" | "email" | "phone" | "address" | "custom_field_data"
+  > & {
+    submissionId: string;
+    petId: string;
+    termsAccepted: boolean;
+  },
+) {
+  "use server";
+
+  if (!input.termsAccepted) {
+    throw new Error("The adoption contract must be accepted");
+  }
+
+  return pawplacer.people.create(
+    {
+      type: "adopter",
+      name: input.name,
+      email: input.email,
+      phone: input.phone,
+      address: input.address,
+      custom_field_data: input.custom_field_data,
+      application: {
+        pet_ids: [input.petId],
+        terms_accepted: true,
+      },
+    },
+    {
+      // Generate this UUID in the browser and reuse it across submission retries.
+      idempotencyKey: input.submissionId,
+    },
+  );
 }

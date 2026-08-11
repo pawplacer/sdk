@@ -1,5 +1,3 @@
-import type { KyInstance } from "ky";
-
 import type {
   CacheManager,
   CachePolicy,
@@ -9,13 +7,43 @@ import type {
 import { PawPlacerApiError } from "./errors";
 import type { ApiError, ApiResponseMeta, RateLimitInfo } from "./types";
 
+export interface KyRequestOptions {
+  headers?: HeadersInit;
+  json?: unknown;
+  retry?: unknown;
+  searchParams?:
+    | string
+    | URLSearchParams
+    | Record<string, unknown>
+    | Array<[string, unknown]>;
+  [key: string]: unknown;
+}
+
+interface RequestClient {
+  get(path: string, options?: KyRequestOptions): Promise<Response>;
+  post(path: string, options?: KyRequestOptions): Promise<Response>;
+  put(path: string, options?: KyRequestOptions): Promise<Response>;
+  patch(path: string, options?: KyRequestOptions): Promise<Response>;
+  delete(path: string, options?: KyRequestOptions): Promise<Response>;
+}
+
+/**
+ * Structural constructor input that accepts ky and compatible request clients
+ * without leaking ky's ESM-only types into this package's declarations.
+ */
+interface RequestClientInput {
+  get: (...args: never[]) => PromiseLike<Response>;
+  post: (...args: never[]) => PromiseLike<Response>;
+  put: (...args: never[]) => PromiseLike<Response>;
+  patch: (...args: never[]) => PromiseLike<Response>;
+  delete: (...args: never[]) => PromiseLike<Response>;
+}
+
 export interface RequestCacheOptions extends CachePolicy {
   key?: string;
   enabled?: boolean;
   refreshFrequencyMinutes?: number;
 }
-
-export type KyRequestOptions = NonNullable<Parameters<KyInstance["get"]>[1]>;
 
 export interface RequestOptions extends KyRequestOptions {
   memoize?: RequestCacheOptions | false;
@@ -218,15 +246,15 @@ function mergeHeaders(
 }
 
 export class RequestManager {
-  private ky: KyInstance;
+  private ky: RequestClient;
   private cache: CacheManager | null;
   private inFlight = new Map<string, Promise<unknown>>();
   private _lastResponseMeta: ApiResponseMeta = {};
   private etags = new Map<string, string>();
   private etagBodies = new Map<string, unknown>();
 
-  constructor(kyInstance: KyInstance, cache: CacheManager | null) {
-    this.ky = kyInstance;
+  constructor(kyInstance: RequestClientInput, cache: CacheManager | null) {
+    this.ky = kyInstance as unknown as RequestClient;
     this.cache = cache;
   }
 
@@ -413,7 +441,7 @@ export class RequestManager {
     }
 
     if (parser === "json") {
-      const body = await response.json<T>();
+      const body = (await response.json()) as T;
       if (method === "get" && cacheKey && !this.cache) {
         this.etagBodies.set(cacheKey, body);
       }
