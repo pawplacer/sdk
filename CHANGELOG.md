@@ -5,6 +5,12 @@ All notable changes to `pawplacer-sdk` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Documented the raised per-key API rate limits: reads are now 2,000/hour for list endpoints and 5,000/hour for single-record endpoints, metadata endpoints (custom fields, adoption fees, contracts) are 50/hour, and writes are 250/hour. No SDK code changes are required — limits are enforced server-side and still reported through `lastResponseMeta.rateLimit`.
+
 ## [1.6.0] - 2026-08-11
 
 ### Added

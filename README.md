@@ -358,18 +358,19 @@ Common status codes:
 
 Rate limits are per API key. Headers are exposed via `pawplacer.lastResponseMeta.rateLimit`.
 
-| Endpoint                        | Requests / hour |
-| ------------------------------- | --------------- |
-| `GET /api/pets`                 | 100             |
-| `GET /api/pets/{id}`            | 400             |
-| `GET /api/pets/custom-fields`   | 15              |
-| `POST /api/pets`                | 10              |
-| `GET /api/people`               | 100             |
-| `GET /api/people/{id}`          | 400             |
-| `GET /api/people/custom-fields` | 15              |
-| `POST /api/people`              | 10              |
-| `GET /api/adoption-fees`        | 15              |
-| `GET /api/contracts`            | 15              |
+| Endpoint                            | Requests / hour |
+| ----------------------------------- | --------------- |
+| `GET /api/pets`                     | 2,000           |
+| `GET /api/pets/{id}`                | 5,000           |
+| `GET /api/pets/custom-fields`       | 50              |
+| `POST /api/pets`                    | 250             |
+| `PATCH /api/pets/{idOrCustomId}`    | 250             |
+| `GET /api/people`                   | 2,000           |
+| `GET /api/people/{id}`              | 5,000           |
+| `GET /api/people/custom-fields`     | 50              |
+| `POST /api/people`                  | 250             |
+| `GET /api/adoption-fees`            | 50              |
+| `GET /api/contracts`                | 50              |
 
 ---
 
