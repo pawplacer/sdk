@@ -94,20 +94,26 @@ export class PawPlacerClient {
           async ({ error }) => {
             const httpError = error as HTTPError;
             const { response } = httpError;
-            if (response?.body) {
+            if (!response) {
+              return httpError;
+            }
+            // ky 2 reads the error body into `error.data` before this hook
+            // runs, so the response body itself can no longer be read.
+            let body: unknown = httpError.data;
+            if (body === undefined && response.body && !response.bodyUsed) {
               try {
-                const body = await response.clone().json();
-                const apiError = normalizeApiError(body);
-                if (apiError) {
-                  apiError.status = response.status;
-                  httpError.message = apiError.message;
-                  (
-                    httpError as HTTPError & { apiError?: typeof apiError }
-                  ).apiError = apiError;
-                }
+                body = await response.clone().json();
               } catch {
-                // Failed to parse error body
+                // Not a JSON body.
               }
+            }
+            const apiError = normalizeApiError(body);
+            if (apiError) {
+              apiError.status = response.status;
+              httpError.message = apiError.message;
+              (
+                httpError as HTTPError & { apiError?: typeof apiError }
+              ).apiError = apiError;
             }
             return httpError;
           },

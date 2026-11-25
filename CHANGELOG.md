@@ -7,9 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-11-25
+
+### Fixed
+
+- API errors throw `PawPlacerApiError` again, with the API's message, `code`, `status`, and `requestId`. Since 1.6.0, ky 2 read the error body before the SDK could, so every non-2xx response surfaced as ky's generic "Request failed with status code ..." `HTTPError` and the API's message was lost.
+
+## [1.6.1] - 2026-08-12
+
 ### Changed
 
-- Documented the raised per-key API rate limits: reads are now 2,000/hour for list endpoints and 5,000/hour for single-record endpoints, metadata endpoints (custom fields, adoption fees, contracts) are 50/hour, and writes are 250/hour. No SDK code changes are required — limits are enforced server-side and still reported through `lastResponseMeta.rateLimit`.
+- Documented the raised per-key API rate limits: reads are now 2,000/hour for list endpoints and 5,000/hour for single-record endpoints, metadata endpoints (custom fields, adoption fees, contracts) are 50/hour, and writes are 250/hour. No SDK code changes are required. Limits are enforced server-side and still reported through `lastResponseMeta.rateLimit`.
 
 ## [1.6.0] - 2026-08-11
 
