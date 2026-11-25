@@ -1,186 +1,120 @@
-import ky, { type HTTPError, type KyInstance } from "ky";
+import ky from "ky";
 
 import { CacheManager, type CacheSnapshot } from "./cache";
-import { normalizeApiError } from "./errors";
 import { RequestManager } from "./request-manager";
 import { AdoptionFeesApi } from "./resources/adoption-fees";
 import { ContractsApi } from "./resources/contracts";
 import { PeopleApi } from "./resources/people";
 import { PetsApi } from "./resources/pets";
-import type {
-  ApiResponseMeta,
-  PawPlacerConfig,
-  Pet,
-  PetListParams,
-} from "./types";
+import type { ApiResponseMeta, PawPlacerConfig } from "./types";
+import { SDK_VERSION } from "./version";
 
-function ensureServerEnvironment(config: PawPlacerConfig): void {
-  const runningInBrowser = typeof window !== "undefined";
-  if (runningInBrowser && config.allowBrowser !== true) {
+const DEFAULT_API_URL = "https://pawplacer.com";
+
+function resolveApiKey(apiKey: string | undefined): string {
+  const env = (
+    globalThis as { process?: { env?: Record<string, string | undefined> } }
+  ).process?.env;
+  const resolved = (apiKey ?? env?.PAWPLACER_API_KEY ?? "").trim();
+  if (!resolved) {
     throw new Error(
-      "PawPlacer SDK must be instantiated on the server. If you are testing locally in a browser, pass allowBrowser: true explicitly.",
+      "PawPlacer API key is required. Pass apiKey or set PAWPLACER_API_KEY. Generate a key in Settings > SDK & API.",
     );
   }
-}
-
-function getEnvApiKey(): string {
-  const globalWithProcess = globalThis as typeof globalThis & {
-    process?: { env?: Record<string, string | undefined> };
-  };
-  const value = globalWithProcess.process?.env?.PAWPLACER_API_KEY;
-  return typeof value === "string" ? value.trim() : "";
+  return resolved;
 }
 
 export class PawPlacerClient {
-  private ky: KyInstance;
-  private cache: CacheManager | null = null;
+  readonly pets: PetsApi;
+  readonly people: PeopleApi;
+  readonly adoptionFees: AdoptionFeesApi;
+  readonly contracts: ContractsApi;
+
   private requests: RequestManager;
-  public pets: PetsApi;
-  public people: PeopleApi;
-  public adoptionFees: AdoptionFeesApi;
-  public contracts: ContractsApi;
+  private cache: CacheManager | null;
 
   constructor(config: PawPlacerConfig = {}) {
-    ensureServerEnvironment(config);
-
-    const apiKey =
-      typeof config.apiKey === "string" && config.apiKey.trim().length > 0
-        ? config.apiKey.trim()
-        : getEnvApiKey();
-    if (!apiKey) {
+    if (typeof window !== "undefined" && config.allowBrowser !== true) {
       throw new Error(
-        "apiKey is required for authentication. Pass apiKey or set PAWPLACER_API_KEY. Generate a key in Settings > SDK & API.",
+        "PawPlacer SDK must run on the server so your API key stays secret. For local browser testing only, pass allowBrowser: true.",
       );
     }
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-      "X-API-Key": apiKey,
-    };
 
-    const apiUrl = (config.apiUrl ?? "https://pawplacer.com").replace(
-      /\/+$/,
-      "",
-    );
+    const log = config.debug
+      ? (...args: unknown[]) => console.debug("[PawPlacer SDK]", ...args)
+      : undefined;
 
-    this.ky = ky.create({
-      prefix: apiUrl,
-      timeout: config.timeout || 30000, // 30 seconds
-      headers,
+    const http = ky.create({
+      prefix: (config.apiUrl ?? DEFAULT_API_URL).replace(/\/+$/, ""),
+      timeout: config.timeout ?? 30_000,
+      headers: {
+        Accept: "application/json",
+        "User-Agent": `pawplacer-sdk/${SDK_VERSION}`,
+        "X-API-Key": resolveApiKey(config.apiKey),
+      },
       retry: {
         limit: config.retryLimit ?? 2,
-        methods: ["get", "put", "patch", "delete"],
+        // Writes are retried per request, only when they carry an idempotency key.
+        methods: ["get"],
         statusCodes: [408, 429, 500, 502, 503, 504],
-        backoffLimit: config.retryBackoffLimit ?? 3000, // 3 seconds
+        backoffLimit: config.retryBackoffLimit ?? 3000,
       },
-      hooks: {
-        beforeRequest: [
-          ({ request }) => {
-            if (config.debug) {
-              console.debug(`[PawPlacer SDK] ${request.method} ${request.url}`);
-            }
-          },
-        ],
-        beforeRetry: [
-          ({ error, retryCount }) => {
-            if (config.debug) {
-              console.debug(
-                `[PawPlacer SDK] Retry attempt ${retryCount} after error:`,
-                error.message,
-              );
-            }
-          },
-        ],
-        beforeError: [
-          async ({ error }) => {
-            const httpError = error as HTTPError;
-            const { response } = httpError;
-            if (!response) {
-              return httpError;
-            }
-            // ky 2 reads the error body into `error.data` before this hook
-            // runs, so the response body itself can no longer be read.
-            let body: unknown = httpError.data;
-            if (body === undefined && response.body && !response.bodyUsed) {
-              try {
-                body = await response.clone().json();
-              } catch {
-                // Not a JSON body.
-              }
-            }
-            const apiError = normalizeApiError(body);
-            if (apiError) {
-              apiError.status = response.status;
-              httpError.message = apiError.message;
-              (
-                httpError as HTTPError & { apiError?: typeof apiError }
-              ).apiError = apiError;
-            }
-            return httpError;
-          },
-        ],
-      },
+      hooks: log
+        ? {
+            beforeRequest: [
+              ({ request }) => log(request.method, request.url),
+            ],
+            beforeRetry: [
+              ({ error, retryCount }) =>
+                log(`Retry ${retryCount} after error:`, error.message),
+            ],
+          }
+        : {},
     });
 
-    const cacheEnabled = config.cache?.enabled !== false;
-    if (cacheEnabled) {
-      const refreshFrequencyInput =
-        config.cache?.refreshFrequencyMinutes ?? config.cache?.refreshFrequency;
-      const refreshFrequencyMinutes =
-        typeof refreshFrequencyInput === "number" &&
-        Number.isFinite(refreshFrequencyInput)
-          ? Math.max(refreshFrequencyInput, 0)
-          : undefined;
-      const refreshFrequencyMs =
-        refreshFrequencyMinutes !== undefined
-          ? refreshFrequencyMinutes * 60 * 1000
-          : undefined;
-      this.cache = new CacheManager({
-        refreshFrequencyMs,
-        maxSize: config.cache?.maxSize,
-      });
-    }
+    const cacheConfig = config.cache ?? {};
+    this.cache =
+      cacheConfig.enabled === false
+        ? null
+        : new CacheManager({
+            maxSize: cacheConfig.maxSize,
+            maxAgeOverrideMs:
+              cacheConfig.ttlSeconds !== undefined
+                ? cacheConfig.ttlSeconds * 1000
+                : undefined,
+          });
 
-    this.requests = new RequestManager(this.ky, this.cache);
+    this.requests = new RequestManager(http, this.cache);
     this.pets = new PetsApi(this.requests);
     this.people = new PeopleApi(this.requests, this.pets);
     this.adoptionFees = new AdoptionFeesApi(this.requests);
     this.contracts = new ContractsApi(this.requests);
   }
 
-  /**
-   * @deprecated Use `client.pets.get(id, options)` instead.
-   */
-  async getPetById(
-    id: string,
-    options?: { forceRefresh?: boolean },
-  ): Promise<Pet> {
-    return this.pets.get(id, options);
-  }
-
-  /**
-   * @deprecated Use `client.pets.findMany(filter, limit)` instead.
-   */
-  async findPets(filter?: PetListParams, limit?: number): Promise<Pet[]> {
-    return this.pets.findMany(filter, limit);
-  }
-
+  /** Drops every cached response. */
   clearCache(): void {
-    this.cache?.clear();
-    this.requests.clearEtags();
+    this.requests.clearCache();
   }
 
-  invalidateCache(pattern?: string | RegExp): void {
-    if (pattern) {
-      this.requests.invalidateMatching(pattern);
-    } else {
-      this.clearCache();
-    }
+  /**
+   * Drops cached responses whose key contains `pattern` (or matches a RegExp).
+   * Keys: `pets:list:<query>`, `pets:get:<id>`, `pets:custom-fields`,
+   * `people:list:<query>`, `people:get:<type>:<id>`, `people:custom-fields:<type>`,
+   * `adoption-fees`, `contracts:<type>`.
+   */
+  invalidateCache(pattern: string | RegExp): void {
+    this.requests.invalidate(pattern);
   }
 
+  /** Cache hit/miss counters, or null when the cache is disabled. */
   cacheStats(): CacheSnapshot | null {
     return this.cache?.stats() ?? null;
   }
 
+  /**
+   * Headers from the most recent network response (cache hits don't update it).
+   * Shared across concurrent requests, so read it right after the call you care about.
+   */
   get lastResponseMeta(): ApiResponseMeta {
     return this.requests.lastResponseMeta;
   }

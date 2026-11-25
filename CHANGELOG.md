@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-25
+
+### Fixed
+
+- After a 304 revalidation, cached responses stay fresh for the API's `max-age` (60 seconds). Before, they fell back to a 3-hour default.
+- `pets.update(..., { retry: false })` and `{ idempotencyKey: false }` no longer retry the PATCH. The client retried every PATCH by default.
+- Cached `ETag` bodies are no longer kept in a second, unbounded map when the cache is disabled.
+- `lastResponseMeta.rateLimit` is omitted when the API reports `X-RateLimit-Remaining: -1`, which means usage wasn't known.
+
+### Added
+
+- `pets.listAll(params)` and `people.listAll(params)` return async iterators that fetch every page.
+- `pets.update` can clear fields: `[]` clears lists and `""` clears text fields such as `description`, `weight`, and `intake_date`. Before, the SDK stripped empty values, so they never reached the API.
+- Types now match what the API sends:
+  - `PetSpecies` includes all 10 species (`horse`, `small_furry`, `bird`, `barnyard`, `reptile`, `scales_fins_other`, and `invertebrate` were missing).
+  - `PetCompatibility` includes `houseTrained`.
+  - `Pet` has `hold_until` and `is_sample`.
+  - `Person` has the volunteer fields `skills`, `interests`, `preferred_roles`, and `languages`. `people.create` accepts them.
+  - `PersonApplicationCreateInput` accepts `template_id` (the API returns 409 `form_changed` if the form changed since) and `external_user_id`.
+- `PetUpdateInput`, `WriteOptions`, `PERSON_TYPES`, `CONTRACT_TYPES`, and `SDK_VERSION` are exported.
+- `lastResponseMeta.sampleData` is `true` while the account has sample data active (from the `X-PawPlacer-Sample-Data` response header). API keys now work in sample workspaces, and responses include the sample records. `Pet.is_sample` marks sample pets.
+- Requests send `User-Agent: pawplacer-sdk/<version>`.
+
+### Changed
+
+- **Node 22.12 or newer is required.** 1.6.x already depended on ky 2, which requires Node 22; the old `>=18` in package.json was wrong. 22.12 is the first release that can `require()` ky from the CommonJS build without a flag.
+- Every non-2xx response throws `PawPlacerApiError`, including responses without a PawPlacer error body (`code` is `http_<status>`). `status` is always set. Code that caught ky's `HTTPError` should catch `PawPlacerApiError` instead.
+- Caching follows the API's `Cache-Control` header: 60 seconds fresh, then 5 minutes of stale-while-revalidate. If a refresh fails, the SDK keeps serving the last good response. Eviction is now least-recently-used.
+- `cache.refreshFrequencyMinutes` is replaced by `cache.ttlSeconds`. The old option was silently overridden by the API's `Cache-Control` header. `ttlSeconds` really does override it.
+- `pets.create` no longer requires `health`, matching the API.
+- `Pet.status` is typed `string`. The API returns the status label (for example `"Available"`), not the camelCase name. `PetStatus` lists the account's default status names, and accepts any other string.
+- Pet enum fields (`species`, `sex`, `size`, `age_category`, `health`) are typed to allow `""`, which the API returns when they aren't set.
+- `SurrenderPetCreateInput.urgency` only accepts `low`, `normal`, `high`, or `urgent`. The API rejects any other value.
+- `PawPlacerClient.pets`, `.people`, `.adoptionFees`, and `.contracts` are `readonly`.
+- The published build is no longer minified, so stack traces are readable.
+
+### Removed
+
+These were deprecated or duplicated:
+
+| Removed | Use instead |
+| ------- | ----------- |
+| `client.getPetById(id)` | `client.pets.get(id)` |
+| `client.findPets(filter, limit)` | `client.pets.list({ ...filter, limit })` |
+| `pets.getById`, `people.getById` | `pets.get`, `people.get` |
+| `pets.findMany`, `people.findMany` | `(await list(params)).data`, or `listAll` |
+| `pets.search(query)` | `pets.list({ search: query })` |
+| `pets.getByStatus(status)` | `pets.list({ status })` |
+| `PetCreateInput.breeds`, `.colors`, `.is_published` | `breed`, `color`, `show_public` |
+| `cache.refreshFrequency`, `cache.refreshFrequencyMinutes` | `cache.ttlSeconds` |
+| `invalidateCache()` with no argument | `clearCache()` |
+| `CreateOptions`, `CreatePetOptions`, `CreatePersonOptions` | `WriteOptions` |
+| `PetCustomField`, `PersonCustomField` | `CustomField` |
+
+These internals were also exported and are no longer: `RequestManager`, `CacheManager`, `KyRequestOptions`, `RequestOptions`, `RequestCacheOptions`, `CacheSettings`, `CachePolicy`, `CacheMetrics`, the `validate*` functions, `normalizeApiError`, `throwApiError`, and `throwIfApiError`. The API never returns an error body with a 2xx status, so `throwIfApiError` had nothing to catch. `PetsApi`, `PeopleApi`, `AdoptionFeesApi`, and `ContractsApi` are still exported, as types only.
+
+### Known API behavior (unchanged, now documented)
+
+- `Pet.custom_id` and `Pet.microchip_id` are always `null` in responses. You can still update a pet by its `custom_id`.
+- `pets.get` needs the pet UUID. Only `pets.update` accepts a `custom_id`.
+
 ## [1.6.2] - 2026-11-25
 
 ### Fixed

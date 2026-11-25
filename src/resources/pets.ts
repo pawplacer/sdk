@@ -1,313 +1,214 @@
-import { throwIfApiError } from "../errors";
 import {
-  assignPresentFields,
+  assignDefined,
   buildSearchParams,
+  optionalBoolean,
   optionalRecord,
   optionalString,
   optionalStringArray,
   requireId,
   requireString,
 } from "../internal";
-import type { JsonRecord } from "../internal";
 import type { RequestManager } from "../request-manager";
 import type {
-  CreatePetOptions,
   CustomField,
   Pet,
   PetCreateInput,
   PetListParams,
   PetListResponse,
+  PetUpdateInput,
+  WriteOptions,
 } from "../types";
 import {
   validatePet,
   validatePetCustomFieldsResponse,
   validatePetListResponse,
 } from "../validation";
-import { applyPostOptions } from "./_post-options";
+
+const REQUIRED_FIELDS: ReadonlyArray<[keyof PetCreateInput, string?]> = [
+  ["name"],
+  ["species", "e.g. dog, cat, or rabbit"],
+  ["age_category", "youngest, young, adult, or senior"],
+  ["sex", "male, female, or unknown"],
+  ["size", "xSmall, small, medium, large, or xLarge"],
+  ["status"],
+];
+
+const STRING_FIELDS = [
+  "health",
+  "age_years",
+  "age_months",
+  "age_birthday",
+  "description",
+  "microchip_id",
+  "coat_length",
+  "custom_id",
+  "custom_status_id",
+  "intake_date",
+  "location_found",
+  "outcome_date",
+  "primary_veterinarian_id",
+  "reason_for_surrender",
+  "status_change_notes",
+  "template_id",
+  "weight",
+] as const satisfies ReadonlyArray<keyof PetCreateInput>;
+
+const STRING_ARRAY_FIELDS = [
+  "breed",
+  "color",
+  "good_with",
+  "bad_with",
+  "temperaments",
+  "image_urls",
+  "special_needs",
+] as const satisfies ReadonlyArray<keyof PetCreateInput>;
+
+function normalizeAdoptionFee(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toString();
+  }
+  if (typeof value === "string") return value.trim();
+  throw new Error("Pet adoption_fee must be a finite number or string");
+}
+
+/** Trimmed string. Blank strings are dropped on create and sent on update, where `""` clears the field. */
+function textField(
+  value: unknown,
+  field: string,
+  mode: "create" | "update",
+): string | undefined {
+  const normalized = optionalString(value, "Pet", field);
+  if (normalized === undefined && mode === "update" && typeof value === "string") {
+    return "";
+  }
+  return normalized;
+}
+
+/**
+ * Validates and trims a pet write payload. On create every required field must
+ * be present; on update every field is optional.
+ */
+function normalizePetPayload(
+  data: Partial<PetCreateInput>,
+  mode: "create" | "update",
+): Record<string, unknown> {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(`Pet ${mode} payload must be an object`);
+  }
+  const payload: Record<string, unknown> = {};
+
+  for (const [field, hint] of REQUIRED_FIELDS) {
+    payload[field] =
+      mode === "create"
+        ? requireString(data[field], "Pet", field, hint)
+        : optionalString(data[field], "Pet", field);
+  }
+  for (const field of STRING_FIELDS) {
+    payload[field] = textField(data[field], field, mode);
+  }
+  for (const field of STRING_ARRAY_FIELDS) {
+    payload[field] = optionalStringArray(data[field], "Pet", field);
+  }
+  const adoptionFee = normalizeAdoptionFee(data.adoption_fee);
+  payload.adoption_fee =
+    adoptionFee === "" && mode === "create" ? undefined : adoptionFee;
+  payload.spayed = optionalBoolean(data.spayed, "Pet", "spayed");
+  payload.show_public = optionalBoolean(data.show_public, "Pet", "show_public");
+  payload.custom_field_data = optionalRecord(
+    data.custom_field_data,
+    "Pet",
+    "custom_field_data",
+  );
+
+  const result: Record<string, unknown> = {};
+  assignDefined(result, payload);
+  return result;
+}
 
 export class PetsApi {
   constructor(private requests: RequestManager) {}
 
-  private normalizePetWritePayload(
-    data: Partial<PetCreateInput>,
-    options: { requireCreateFields: boolean },
-  ): Record<string, unknown> {
-    const payload: Record<string, unknown> = {};
-
-    if (options.requireCreateFields) {
-      Object.assign(payload, {
-        name: requireString(data.name, "Pet", "name"),
-        species: requireString(
-          data.species,
-          "Pet",
-          "species",
-          "dog, cat, or rabbit",
-        ),
-        age_category: requireString(
-          data.age_category,
-          "Pet",
-          "age_category",
-          "youngest, young, adult, or senior",
-        ),
-        sex: requireString(data.sex, "Pet", "sex", "male, female, or unknown"),
-        size: requireString(
-          data.size,
-          "Pet",
-          "size",
-          "xSmall, small, medium, large, or xLarge",
-        ),
-        status: requireString(data.status, "Pet", "status"),
-        health: requireString(
-          data.health,
-          "Pet",
-          "health",
-          "unknown, poor, good, or great",
-        ),
-      });
-    } else {
-      assignPresentFields(payload, {
-        name: optionalString(data.name, "Pet", "name"),
-        species: optionalString(data.species, "Pet", "species"),
-        age_category: optionalString(data.age_category, "Pet", "age_category"),
-        sex: optionalString(data.sex, "Pet", "sex"),
-        size: optionalString(data.size, "Pet", "size"),
-        status: optionalString(data.status, "Pet", "status"),
-        health: optionalString(data.health, "Pet", "health"),
-      });
-    }
-
-    const breed = optionalStringArray(
-      data.breed ?? data.breeds,
-      "Pet",
-      "breed",
-    );
-    if (breed) payload.breed = breed;
-
-    const color = optionalStringArray(
-      data.color ?? data.colors,
-      "Pet",
-      "color",
-    );
-    if (color) payload.color = color;
-
-    if (data.adoption_fee !== undefined) {
-      let adoptionFee: string;
-      if (typeof data.adoption_fee === "number") {
-        if (!Number.isFinite(data.adoption_fee)) {
-          throw new Error("Pet adoption_fee must be a finite number or string");
-        }
-        adoptionFee = data.adoption_fee.toString();
-      } else if (typeof data.adoption_fee === "string") {
-        adoptionFee = data.adoption_fee.trim();
-      } else {
-        throw new Error("Pet adoption_fee must be a finite number or string");
-      }
-      if (adoptionFee.length > 0) {
-        payload.adoption_fee = adoptionFee;
-      }
-    }
-
-    assignPresentFields(payload, {
-      age_years: optionalString(data.age_years, "Pet", "age_years"),
-      age_months: optionalString(data.age_months, "Pet", "age_months"),
-      age_birthday: optionalString(data.age_birthday, "Pet", "age_birthday"),
-      description: optionalString(data.description, "Pet", "description"),
-      spayed: data.spayed,
-      microchip_id: optionalString(data.microchip_id, "Pet", "microchip_id"),
-      good_with: optionalStringArray(data.good_with, "Pet", "good_with"),
-      bad_with: optionalStringArray(data.bad_with, "Pet", "bad_with"),
-      temperaments: optionalStringArray(
-        data.temperaments,
-        "Pet",
-        "temperaments",
-      ),
-      image_urls: optionalStringArray(data.image_urls, "Pet", "image_urls"),
-      coat_length: optionalString(data.coat_length, "Pet", "coat_length"),
-      custom_field_data: optionalRecord(
-        data.custom_field_data,
-        "Pet",
-        "custom_field_data",
-      ),
-      custom_id: optionalString(data.custom_id, "Pet", "custom_id"),
-      custom_status_id: optionalString(
-        data.custom_status_id,
-        "Pet",
-        "custom_status_id",
-      ),
-      intake_date: optionalString(data.intake_date, "Pet", "intake_date"),
-      location_found: optionalString(
-        data.location_found,
-        "Pet",
-        "location_found",
-      ),
-      outcome_date: optionalString(data.outcome_date, "Pet", "outcome_date"),
-      primary_veterinarian_id: optionalString(
-        data.primary_veterinarian_id,
-        "Pet",
-        "primary_veterinarian_id",
-      ),
-      reason_for_surrender: optionalString(
-        data.reason_for_surrender,
-        "Pet",
-        "reason_for_surrender",
-      ),
-      special_needs: optionalStringArray(
-        data.special_needs,
-        "Pet",
-        "special_needs",
-      ),
-      status_change_notes: optionalString(
-        data.status_change_notes,
-        "Pet",
-        "status_change_notes",
-      ),
-      template_id: optionalString(data.template_id, "Pet", "template_id"),
-      show_public: data.show_public ?? data.is_published,
-      weight: optionalString(data.weight, "Pet", "weight"),
-    });
-
-    return payload;
-  }
-
-  private normalizeCreatePayload(
-    data: PetCreateInput,
-  ): Record<string, unknown> {
-    return this.normalizePetWritePayload(data, { requireCreateFields: true });
-  }
-
-  private normalizeUpdatePayload(
-    data: Partial<PetCreateInput>,
-  ): Record<string, unknown> {
-    const payload = this.normalizePetWritePayload(data, {
-      requireCreateFields: false,
-    });
-    if (Object.keys(payload).length === 0) {
-      throw new Error("Update payload must include at least one field");
-    }
-    return payload;
-  }
-
-  /** List pets with optional filters. Returns paginated results. */
+  /** List pets with optional filters. Returns one page of results. */
   async list(params?: PetListParams): Promise<PetListResponse> {
     const searchParams = buildSearchParams(params);
-    const response = await this.requests.get<JsonRecord>("api/pets", {
+    const response = await this.requests.get("api/pets", {
       searchParams,
-      memoize: { key: `pets:list:${searchParams.toString()}` },
+      cacheKey: `pets:list:${searchParams}`,
     });
-    throwIfApiError(response);
-    const { pets, total, limit, offset, hasMore } =
-      validatePetListResponse(response);
-    return { data: pets, total, limit, offset, hasMore };
+    const { pets, ...page } = validatePetListResponse(response);
+    return { data: pets, ...page };
   }
 
-  /** Fetch a single pet by ID. */
+  /**
+   * Iterate every pet matching `params`, fetching pages of `params.limit`
+   * (default 100) as needed.
+   *
+   * ```ts
+   * for await (const pet of pawplacer.pets.listAll({ status: "available" })) { ... }
+   * ```
+   */
+  async *listAll(params?: Omit<PetListParams, "offset">): AsyncGenerator<Pet> {
+    const limit = params?.limit ?? 100;
+    let offset = 0;
+    while (true) {
+      const page = await this.list({ ...params, limit, offset });
+      yield* page.data;
+      if (!page.hasMore || page.data.length === 0) return;
+      offset += page.data.length;
+    }
+  }
+
+  /** Fetch a single pet by PawPlacer pet UUID. */
   async get(id: string, options?: { forceRefresh?: boolean }): Promise<Pet> {
-    const trimmedId = requireId(id, "Pet");
-    const response = await this.requests.get<JsonRecord>(
-      `api/pets/${trimmedId}`,
-      {
-        memoize: {
-          key: `pets:get:${trimmedId}`,
-          staleWhileRevalidateMs: 30 * 60 * 1000,
-          forceRefresh: options?.forceRefresh,
-        },
-      },
+    const petId = requireId(id, "Pet");
+    const response = await this.requests.get(
+      `api/pets/${encodeURIComponent(petId)}`,
+      { cacheKey: `pets:get:${petId}`, forceRefresh: options?.forceRefresh },
     );
-    throwIfApiError(response);
     return validatePet(response);
   }
 
-  /** Alias for `get`. */
-  async getById(
-    id: string,
-    options?: { forceRefresh?: boolean },
-  ): Promise<Pet> {
-    return this.get(id, options);
-  }
-
-  /** Convenience method that returns a plain `Pet[]` array. Defaults to 10 results. */
-  async findMany(params?: PetListParams, limit?: number): Promise<Pet[]> {
-    const result = await this.list({
-      ...params,
-      limit: limit ?? params?.limit ?? 10,
-      offset: params?.offset ?? 0,
-    });
-    return result.data;
-  }
-
-  /** Create a new pet. Sends an idempotency key by default. */
-  async create(data: PetCreateInput, options?: CreatePetOptions): Promise<Pet> {
-    if (!data || typeof data !== "object") {
-      throw new Error("Create payload is required");
-    }
-    const payload = this.normalizeCreatePayload(data);
-    const headers: Record<string, string> = {};
-    const requestOptions: Record<string, unknown> = { json: payload, headers };
-    applyPostOptions(headers, requestOptions, options);
-
-    const pet = await this.requests.post<JsonRecord>(
-      "api/pets",
-      requestOptions,
+  /** Create a pet. Sends an idempotency key by default so retries are safe. */
+  async create(data: PetCreateInput, options?: WriteOptions): Promise<Pet> {
+    const json = normalizePetPayload(data, "create");
+    const pet = validatePet(
+      await this.requests.post("api/pets", { json, ...options }),
     );
-    throwIfApiError(pet);
-    this.requests.invalidateMatching("pets:list:");
-    return validatePet(pet);
+    this.requests.invalidate("pets:list:");
+    return pet;
   }
 
-  /** Update an existing pet by PawPlacer pet UUID or custom_id. Sends an idempotency key by default. */
+  /**
+   * Update a pet by PawPlacer pet UUID or `custom_id`. Send only the fields
+   * that changed. Sends an idempotency key by default so retries are safe.
+   */
   async update(
     idOrCustomId: string,
-    data: Partial<PetCreateInput>,
-    options?: CreatePetOptions,
+    data: PetUpdateInput,
+    options?: WriteOptions,
   ): Promise<Pet> {
     const identifier = requireId(idOrCustomId, "Pet");
-    if (!data || typeof data !== "object") {
-      throw new Error("Update payload is required");
+    const json = normalizePetPayload(data, "update");
+    if (Object.keys(json).length === 0) {
+      throw new Error("Pet update payload must include at least one field");
     }
-    const payload = this.normalizeUpdatePayload(data);
-    const headers: Record<string, string> = {};
-    const requestOptions: Record<string, unknown> = { json: payload, headers };
-    applyPostOptions(headers, requestOptions, options, "patch");
-
-    const pet = await this.requests.patch<JsonRecord>(
-      `api/pets/${encodeURIComponent(identifier)}`,
-      requestOptions,
+    const pet = validatePet(
+      await this.requests.patch(`api/pets/${encodeURIComponent(identifier)}`, {
+        json,
+        ...options,
+      }),
     );
-    throwIfApiError(pet);
-    const validatedPet = validatePet(pet);
-    this.requests.invalidateMatching("pets:list:");
-    this.requests.invalidate(`pets:get:${validatedPet.id}`);
-    if (identifier !== validatedPet.id) {
-      this.requests.invalidate(`pets:get:${identifier}`);
-    }
-    return validatedPet;
+    this.requests.invalidate("pets:list:");
+    this.requests.invalidate(`pets:get:${pet.id}`);
+    return pet;
   }
 
-  /** Search pets by name or description. Returns a plain `Pet[]` array. */
-  async search(query: string): Promise<Pet[]> {
-    if (!query || typeof query !== "string" || query.trim().length === 0) {
-      throw new Error(
-        "Search query is required and must be a non-empty string",
-      );
-    }
-    return (await this.list({ search: query })).data;
-  }
-
-  /** Filter pets by status. Returns a plain `Pet[]` array. */
-  async getByStatus(status: string): Promise<Pet[]> {
-    if (!status || typeof status !== "string" || status.trim().length === 0) {
-      throw new Error("Status is required to filter pets");
-    }
-    return (await this.list({ status })).data;
-  }
-
-  /** Fetch the custom field definitions for pet forms. */
+  /** Fetch the account's custom field definitions for pets. */
   async getCustomFields(): Promise<CustomField[]> {
-    const response = await this.requests.get<JsonRecord>(
-      "api/pets/custom-fields",
-      { memoize: { key: "pets:custom-fields", refreshFrequencyMinutes: 15 } },
-    );
-    throwIfApiError(response);
+    const response = await this.requests.get("api/pets/custom-fields", {
+      cacheKey: "pets:custom-fields",
+    });
     return validatePetCustomFieldsResponse(response).custom_fields;
   }
 }

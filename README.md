@@ -1,10 +1,10 @@
 # PawPlacer SDK
 
-TypeScript/JavaScript client for the PawPlacer API. Server-side only.
+TypeScript/JavaScript client for the PawPlacer API. Runs on the server (Node 22.12 or newer).
 
----
+Upgrading from 1.x? See the [2.0.0 changelog](./CHANGELOG.md#200---2026-11-25).
 
-## Installation
+## Install
 
 ```bash
 npm install pawplacer-sdk
@@ -12,25 +12,21 @@ npm install pawplacer-sdk
 
 ## Setup
 
-Generate an API key in **Settings > SDK & API**. Use a `read` key for websites and dashboards. Use a separate `write` key only for backend jobs that create records.
+Create an API key in PawPlacer under **Settings > SDK & API**. Use a `read` key for websites and dashboards, and a separate `write` key for jobs that create or update records.
 
-Store the key in a server-only environment variable and create one client per process:
+Put the key in `PAWPLACER_API_KEY` on your server and create one client per process:
 
 ```typescript
 import { PawPlacerClient } from "pawplacer-sdk";
 
-export const pawplacer = new PawPlacerClient({
-  cache: { enabled: true, refreshFrequencyMinutes: 180 },
-});
+export const pawplacer = new PawPlacerClient();
 ```
 
-By default, the client reads `process.env.PAWPLACER_API_KEY`. You can also pass `apiKey` explicitly when you need to use a different environment variable or credential source.
-
----
+Pass `apiKey` if the key lives somewhere else. The client throws if it's constructed in a browser, because that would expose your key. Browser code should call your own backend route instead (see [examples](#examples)).
 
 ## Pets
 
-### List pets
+### List
 
 ```typescript
 const result = await pawplacer.pets.list({
@@ -40,19 +36,31 @@ const result = await pawplacer.pets.list({
 });
 
 result.data; // Pet[]
-result.total; // total count
-result.hasMore; // pagination
+result.total; // matching pets across all pages
+result.hasMore; // true if there's another page
 ```
 
-Filters: `limit`, `offset`, `species`, `status`, `search`, `updated_since` (ISO-8601). The API clamps `limit` to 100.
+Filters: `status`, `species`, `search`, `updated_since` (ISO-8601), `limit` (1-100, default 20), and `offset`.
 
-### Get a pet
+To go through every page, use `listAll`:
 
 ```typescript
-const pet = await pawplacer.pets.get("pet-uuid");
+for await (const pet of pawplacer.pets.listAll({ status: "available" })) {
+  console.log(pet.name);
+}
 ```
 
-### Create a pet
+A pet's `status` comes back as its display label, such as `"Available"` or `"Medical Treatment"`. Filters and writes accept either the name (`"available"`) or the label.
+
+### Get
+
+```typescript
+const pet = await pawplacer.pets.get("550e8400-e29b-41d4-a716-446655440001");
+```
+
+`get` takes the PawPlacer pet UUID.
+
+### Create
 
 ```typescript
 const pet = await pawplacer.pets.create({
@@ -62,255 +70,172 @@ const pet = await pawplacer.pets.create({
   sex: "male",
   size: "medium",
   status: "available",
-  health: "good",
 });
 ```
 
-All fields above are required. Optional: `breed`, `color`, `description`, `adoption_fee`, `good_with`, `temperaments`, `image_urls`, `custom_field_data`, and more.
+Those six fields are required. Everything else is optional: `health`, `breed`, `color`, `description`, `adoption_fee`, `good_with`, `temperaments`, `image_urls`, `custom_id`, `custom_field_data`, and so on. See `PetCreateInput` for the full list.
 
-### Update a pet
+If `status` doesn't match one of the account's statuses, the pet is created as `available`.
+
+### Update
 
 ```typescript
 const updated = await pawplacer.pets.update("DOG-2026-001", {
-  description: "Updated bio",
-  status: "available",
+  description: "Loves long walks",
   image_urls: ["https://example.com/max.jpg"],
 });
 ```
 
-Updates accept either the PawPlacer pet UUID or an assigned `custom_id`, and the payload can include only the fields that changed. Pass a stable idempotency key as the third argument for retry-safe sync jobs.
+Pass the pet UUID or the `custom_id` you assigned. Send only the fields you want to change.
+
+To clear a field, send an empty value: `[]` for lists like `image_urls` or `special_needs`, and `""` for text like `description`, `weight`, `intake_date`, or `adoption_fee`. `null` isn't accepted. `custom_field_data` is merged into the existing data, so keys you leave out are kept.
 
 ### Custom fields
 
 ```typescript
 const fields = await pawplacer.pets.getCustomFields();
-// Use to validate custom_field_data before creating pets
 ```
 
----
+Returns the account's pet form fields. Use `field_key` as the key in `custom_field_data`. Skip fields with `hidden` or `internal_only` set when showing them to the public.
 
-## People (Adopters, Fosters, Surrenders & Volunteers)
+## People
 
-All people endpoints require a `type` parameter: `"adopter"`, `"foster"`, `"surrender"`, or `"volunteer"`.
+People are adopters, fosters, surrenders, and volunteers. Every call takes a `type`: `"adopter"`, `"foster"`, `"surrender"`, or `"volunteer"`.
 
-### List people
+### List and get
 
 ```typescript
-const result = await pawplacer.people.list({
+const adopters = await pawplacer.people.list({
   type: "adopter",
   status: "active",
   limit: 25,
 });
 
-result.data; // Person[]
-result.type; // "adopter"
-result.total;
-result.hasMore;
+const foster = await pawplacer.people.get("person-uuid", "foster");
 ```
 
-Filters: `type` (required), `limit`, `offset`, `status`, `search`, `updated_since`.
+`list` takes the same filters as pets (minus `species`), and `listAll` works the same way.
 
-### Get a person
-
-```typescript
-const adopter = await pawplacer.people.get("person-uuid", "adopter");
-```
-
-### Create a person
-
-```typescript
-const adopter = await pawplacer.people.create({
-  type: "adopter",
-  name: "Jane Smith",
-  email: "jane@example.com",
-  phone: "555-0100",
-  status: "active",
-  custom_field_data: { has_yard: true },
-});
-```
-
-Only `type` and `name` are required. Optional: `email`, `phone`, `address`, `status`, `custom_field_data`, `capacity`.
-Create status accepts `pending`, `active`, `training`, or `inactive`; admin review states such as `denied`, `suspended`, and `blocked` are controlled in PawPlacer.
-
-To submit an adopter or foster application, render the fields returned by
-`people.getCustomFields(type)` and the markdown returned by `contracts.get(type)`,
-then pass those answers and the accepted terms to `people.create`:
-
-```typescript
-const fields = await pawplacer.people.getCustomFields("adopter");
-const contract = await pawplacer.contracts.get("adopter");
-
-// Render visible, non-internal fields and require acceptance of contract.content.
-const applicant = await pawplacer.people.create({
-  type: "adopter",
-  name: "Jane Smith",
-  email: "jane@example.com",
-  custom_field_data: {
-    housing_type: "house",
-    has_yard: true,
-  },
-  application: {
-    pet_ids: ["550e8400-e29b-41d4-a716-446655440001"],
-    terms_accepted: true,
-  },
-});
-
-applicant.status; // "pending"
-applicant.application?.id; // application submission UUID
-```
-
-Applications require a UUID idempotency key. The SDK generates one by default;
-if supplying your own, pass a UUID in the normal create options.
-
-```typescript
-const surrender = await pawplacer.people.create({
-  type: "surrender",
-  name: "Sam Surrender",
-  email: "sam@example.com",
-  custom_field_data: { reason_for_surrender: "Moving" },
-  pets: [
-    {
-      create: {
-        name: "Buddy",
-        species: "dog",
-        age_category: "adult",
-        sex: "male",
-        size: "large",
-        status: "intake",
-        health: "unknown",
-        breed: ["Lab Mix"],
-      },
-      reason: "Moving",
-      urgency: "high",
-    },
-    {
-      pet_id: "existing-pet-uuid",
-      notes: "Link this surrender to an existing pet profile",
-    },
-  ],
-});
-```
-
-For surrenders, `pets` creates related surrender pet links in the same workflow. Use `create` with the normal pet create payload when the SDK should create and link a new pet, or `pet_id` to link an existing pet.
+### Create
 
 ```typescript
 const volunteer = await pawplacer.people.create({
   type: "volunteer",
   name: "Val Volunteer",
   email: "val@example.com",
+  skills: ["dog walking"],
   custom_field_data: { preferred_shift: "Saturday" },
 });
 ```
 
-### Custom fields
+Only `type` and `name` are required. On create, `status` can be `pending`, `active`, `training` (not for adopters), or `inactive`. Review outcomes like `denied` are set in PawPlacer.
+
+### Adoption and foster applications
+
+To accept applications on your own site:
+
+1. Load the form fields with `people.getCustomFields(type)` and the contract with `contracts.get(type)`.
+2. Show both to the applicant, and have them accept the contract.
+3. Call `people.create` with their answers and an `application`.
 
 ```typescript
-const fields = await pawplacer.people.getCustomFields("adopter");
-// Returns custom fields configured for adopter, foster, surrender, or volunteer forms
+const applicant = await pawplacer.people.create(
+  {
+    type: "adopter",
+    name: "Jane Smith",
+    email: "jane@example.com",
+    custom_field_data: { housing_type: "house", has_yard: true },
+    application: {
+      pet_ids: ["550e8400-e29b-41d4-a716-446655440001"],
+      terms_accepted: true,
+    },
+  },
+  { idempotencyKey: submissionId },
+);
+
+applicant.status; // "pending"
+applicant.application?.id;
 ```
 
----
+An application can include 1 to 5 pets. It needs a UUID idempotency key. The SDK generates one if you don't pass it, but generating `submissionId` with `crypto.randomUUID()` when the form loads (and reusing it if the submit is retried) prevents duplicate applications.
 
-## Adoption Fees
+### Surrenders
 
-Returns the account's full adoption fee configuration (species + attribute + adjustment rules).
+A surrender can link pets that already exist, or create new ones:
+
+```typescript
+await pawplacer.people.create(
+  {
+    type: "surrender",
+    name: "Sam Surrender",
+    email: "sam@example.com",
+    pets: [
+      {
+        create: {
+          name: "Buddy",
+          species: "dog",
+          age_category: "adult",
+          sex: "male",
+          size: "large",
+          status: "intake",
+        },
+        reason: "Moving",
+        urgency: "high",
+      },
+      { pet_id: "existing-pet-uuid", notes: "Already in PawPlacer" },
+    ],
+  },
+  { idempotencyKey: `surrender:${intakeId}` },
+);
+```
+
+Pets under `create` are created first with `pets.create`, and then the surrender is created with links to them. These are separate requests. If you pass an idempotency key, each pet gets a key derived from it (`<key>:pet:0`, `<key>:pet:1`, ...), so retrying the whole call won't create the pets twice.
+
+## Adoption fees and contracts
 
 ```typescript
 const fees = await pawplacer.adoptionFees.get();
-// AdoptionFeeEntry[] — { species, attribute_type, attribute_value, adjustment }
-```
+// [{ species, attribute_type, attribute_value, adjustment }, ...]
 
-Pets also include a `global_adoption_fee` field when the account has fee rules configured and the pet has no manual override.
-
----
-
-## Contracts
-
-Returns terms & conditions content for a given contract type. Content is markdown.
-
-```typescript
 const contract = await pawplacer.contracts.get("adopter");
-contract.type; // "adopter"
-contract.content; // markdown string
+contract.content; // markdown
 contract.updated_at; // ISO-8601 or null
 ```
 
-Valid types: `"adopter"`, `"foster"`, `"volunteer"`, `"surrender"`.
+When an account has fee rules and a pet has no fee of its own, the pet's `global_adoption_fee` holds the computed fee.
 
----
+## Writes, retries, and idempotency
 
-## API Surface
+Every `create` and `update` sends an `Idempotency-Key` header with a random UUID. That lets the SDK safely retry a write that timed out or got a 5xx or 429.
 
-| Method                               | HTTP                                         |
-| ------------------------------------ | -------------------------------------------- |
-| `pets.list(params?)`                 | `GET /api/pets`                              |
-| `pets.get(id)`                       | `GET /api/pets/{id}`                         |
-| `pets.getById(id)`                   | `GET /api/pets/{id}`                         |
-| `pets.findMany(params?, limit?)`     | `GET /api/pets` (returns `Pet[]`)            |
-| `pets.search(query)`                 | `GET /api/pets` (returns `Pet[]`)            |
-| `pets.getByStatus(status)`           | `GET /api/pets` (returns `Pet[]`)            |
-| `pets.getCustomFields()`             | `GET /api/pets/custom-fields`                |
-| `pets.create(payload)`               | `POST /api/pets`                             |
-| `pets.update(idOrCustomId, payload)` | `PATCH /api/pets/{idOrCustomId}`             |
-| `people.list(params)`                | `GET /api/people?type=`                      |
-| `people.get(id, type)`               | `GET /api/people/{id}?type=`                 |
-| `people.getById(id, type)`           | `GET /api/people/{id}?type=`                 |
-| `people.findMany(params, limit?)`    | `GET /api/people?type=` (returns `Person[]`) |
-| `people.create(payload)`             | `POST /api/people`                           |
-| `people.getCustomFields(type)`       | `GET /api/people/custom-fields?type=`        |
-| `adoptionFees.get()`                 | `GET /api/adoption-fees`                     |
-| `contracts.get(type)`                | `GET /api/contracts?type=`                   |
-
----
-
-## Idempotency
-
-Every `create` call automatically sends an `Idempotency-Key` header, which makes SDK-managed retries safe. For background jobs that may replay across restarts, pass a stable key:
+For jobs that might run again (a nightly sync, a queue worker), pass a key tied to your own record. A replay then returns the original result instead of writing twice:
 
 ```typescript
-const pet = await pawplacer.pets.create(
-  {
-    name: "Max",
-    species: "dog",
-    age_category: "young",
-    sex: "male",
-    size: "medium",
-    status: "available",
-    health: "good",
-  },
-  { idempotencyKey: `nightly-sync:${externalId}` },
-);
+await pawplacer.pets.create(pet, { idempotencyKey: `pet-sync:${externalId}` });
 
-pawplacer.lastResponseMeta.idempotencyReplay; // true if replayed
+pawplacer.lastResponseMeta.idempotencyReplay; // true if this was a replay
 ```
 
-Pass `{ idempotencyKey: false }` to opt out.
+Reusing a key with a different payload returns a 409. Pass `{ idempotencyKey: false }` to send no key; the write is then not retried. Pass `{ retry: false }` to keep the key but turn off retries.
 
----
+GETs are retried up to `retryLimit` times (default 2).
 
-## Caching
+## Sample data
 
-GET responses are cached in memory with stale-while-revalidate. The cache is per-process.
+New PawPlacer workspaces can start with sample pets and people. Your account's API keys work while sample data is active, and responses include those sample records alongside any real ones. Partner keys are refused with 403 `sample_workspace_unavailable` until the sample data is gone. Use that to try the API, but don't point a website or sync job at it until you've chosen to keep the sample data or start fresh in **Settings > Danger Zone**.
+
+You can check from code:
 
 ```typescript
-cache: {
-  enabled: true,
-  refreshFrequencyMinutes: 60, // minutes; defaults to 180
-}
+const result = await pawplacer.pets.list();
+
+pawplacer.lastResponseMeta.sampleData; // true while sample data is active
+result.data.filter((pet) => !pet.is_sample); // just the real pets
 ```
 
-When the API returns `Cache-Control` headers, those take precedence. `no-store` or `max-age=0` bypasses the cache entirely.
+Sample people don't have a per-record flag, so use `lastResponseMeta.sampleData` to decide whether to trust people data.
 
-```typescript
-pawplacer.clearCache(); // drop everything
-pawplacer.invalidateCache("pets:list:"); // substring match
-pawplacer.invalidateCache(/^people:/); // regex match
-pawplacer.cacheStats(); // { hits, misses, size }
-```
-
----
-
-## Error Handling
+## Errors
 
 ```typescript
 import {
@@ -319,239 +244,124 @@ import {
 } from "pawplacer-sdk";
 
 try {
-  await pawplacer.pets.create({
-    name: "Max",
-    species: "dog",
-    age_category: "young",
-    sex: "male",
-    size: "medium",
-    status: "available",
-    health: "good",
-  });
+  await pawplacer.pets.update(id, { status: "adopted" });
 } catch (error) {
   if (error instanceof PawPlacerApiError) {
-    console.error(error.status, error.code, error.message);
+    error.status; // 400
+    error.code; // "validation_failed"
+    error.message; // from the API
+    error.requestId; // include this when contacting support
+    error.apiError.details; // field-level problems, when there are any
   } else if (error instanceof PawPlacerResponseValidationError) {
-    console.error("Unexpected response shape:", error.payload);
+    error.payload; // a 2xx response the SDK didn't recognize
   }
 }
 ```
 
-`PawPlacerApiError` is thrown for structured API errors (non-2xx). `PawPlacerResponseValidationError` is thrown when a 2xx response doesn't match the expected shape.
+Every non-2xx response throws `PawPlacerApiError`. If the response has no PawPlacer error body (a gateway error, for example), `code` is `http_<status>`. Network failures and timeouts throw ky's `NetworkError` or `TimeoutError`.
 
-Custom parsing: `throwIfApiError(payload)` throws `PawPlacerApiError` for error payloads.
+Invalid input, such as a missing required field, throws a plain `Error` before any request is sent.
 
-Common status codes:
+| Status | Usually means |
+| ------ | ------------- |
+| 400 | Invalid payload or query |
+| 401 | Missing or invalid API key |
+| 403 | The key's scope doesn't allow this (for example, a `read` key on a write) |
+| 404 | Not found |
+| 409 | Idempotency key reused with a different payload, or the application form changed |
+| 429 | Rate limited. `lastResponseMeta.rateLimit.retryAfter` says how long to wait |
 
-| Status | Cause                                           |
-| ------ | ----------------------------------------------- |
-| 400    | Validation or payload error                     |
-| 401    | Missing or invalid API key                      |
-| 403    | Key doesn't have scope for this endpoint        |
-| 404    | Resource not found                              |
-| 409    | Idempotency key reused with a different payload |
-| 429    | Rate limited                                    |
+## Caching
 
----
+GET responses are cached in memory, per process. The SDK follows the API's `Cache-Control` header. Today that means a response is reused for 60 seconds, then served for up to 5 more minutes while it's refreshed in the background. Refreshes send `If-None-Match`, so unchanged data comes back as a small 304. If a refresh fails, the last good response keeps being served.
 
-## Rate Limits
-
-Rate limits are per API key. Headers are exposed via `pawplacer.lastResponseMeta.rateLimit`.
-
-| Endpoint                            | Requests / hour |
-| ----------------------------------- | --------------- |
-| `GET /api/pets`                     | 2,000           |
-| `GET /api/pets/{id}`                | 5,000           |
-| `GET /api/pets/custom-fields`       | 50              |
-| `POST /api/pets`                    | 250             |
-| `PATCH /api/pets/{idOrCustomId}`    | 250             |
-| `GET /api/people`                   | 2,000           |
-| `GET /api/people/{id}`              | 5,000           |
-| `GET /api/people/custom-fields`     | 50              |
-| `POST /api/people`                  | 250             |
-| `GET /api/adoption-fees`            | 50              |
-| `GET /api/contracts`                | 50              |
-
----
-
-## Response Metadata
+Creates and updates clear the cached lists they affect.
 
 ```typescript
-const result = await pawplacer.pets.list({ status: "available" });
+const pawplacer = new PawPlacerClient({
+  cache: {
+    ttlSeconds: 300, // reuse responses for 5 minutes instead of the API's 60 seconds
+    maxSize: 1000, // max cached responses (default 1000)
+  },
+});
 
-pawplacer.lastResponseMeta.rateLimit; // { limit, remaining, reset }
-pawplacer.lastResponseMeta.requestId; // for support tickets
-pawplacer.lastResponseMeta.idempotencyReplay; // true if replayed
+await pawplacer.pets.get(id, { forceRefresh: true }); // skip the cache once
+pawplacer.invalidateCache("pets:list:"); // keys containing this string
+pawplacer.invalidateCache(/^people:/); // or matching a regex
+pawplacer.clearCache();
+pawplacer.cacheStats(); // { hits, misses, refreshes, size, maxSize }
 ```
 
-`lastResponseMeta` reflects the most recent API call.
+Turn it off with `cache: { enabled: false }`.
 
----
+Cache keys are `pets:list:<query>`, `pets:get:<id>`, `pets:custom-fields`, `people:list:<query>`, `people:get:<type>:<id>`, `people:custom-fields:<type>`, `adoption-fees`, and `contracts:<type>`.
+
+## Rate limits
+
+Limits are per API key, per endpoint, per hour:
+
+| Endpoint | Requests / hour |
+| -------- | --------------- |
+| `GET /api/pets`, `GET /api/people` | 2,000 |
+| `GET /api/pets/{id}`, `GET /api/people/{id}` | 5,000 |
+| `GET /api/pets/custom-fields`, `GET /api/people/custom-fields` | 50 |
+| `GET /api/adoption-fees`, `GET /api/contracts` | 50 |
+| `POST /api/pets`, `PATCH /api/pets/{id}`, `POST /api/people` | 250 |
+
+Cache hits don't count. 304 revalidations do. Current usage is on `pawplacer.lastResponseMeta.rateLimit`:
+
+```typescript
+await pawplacer.pets.list();
+pawplacer.lastResponseMeta.rateLimit; // { limit, remaining, reset }
+pawplacer.lastResponseMeta.requestId;
+```
+
+`lastResponseMeta` reflects the most recent network response, so read it right after the call you care about.
 
 ## Configuration
 
 ```typescript
-const client = new PawPlacerClient({
-  apiKey: process.env.PAWPLACER_API_KEY, // optional when PAWPLACER_API_KEY is set
-  apiUrl: "https://pawplacer.com",
-  timeout: 30000,
+const pawplacer = new PawPlacerClient({
+  apiKey: process.env.PAWPLACER_API_KEY, // default
+  apiUrl: "https://pawplacer.com", // default
+  timeout: 30_000, // ms per attempt
   retryLimit: 2,
-  retryBackoffLimit: 3000,
-  debug: false,
-  allowBrowser: false,
-  cache: {
-    enabled: true,
-    refreshFrequencyMinutes: 180,
-    maxSize: 1000,
-  },
+  retryBackoffLimit: 3000, // max ms between retries
+  debug: false, // log requests and retries with console.debug
+  allowBrowser: false, // local testing only; exposes your key
+  cache: { enabled: true, ttlSeconds: undefined, maxSize: 1000 },
 });
 ```
 
-The SDK blocks browser usage by default to protect your API key. Set `allowBrowser: true` only for local development.
-`cache.refreshFrequency` is accepted for backward compatibility, but deprecated. Use `cache.refreshFrequencyMinutes` for new code.
+## API reference
 
-Deprecated aliases:
+| Method | Request |
+| ------ | ------- |
+| `pets.list(params?)` | `GET /api/pets` |
+| `pets.listAll(params?)` | `GET /api/pets`, every page |
+| `pets.get(id)` | `GET /api/pets/{id}` |
+| `pets.create(input, options?)` | `POST /api/pets` |
+| `pets.update(idOrCustomId, input, options?)` | `PATCH /api/pets/{idOrCustomId}` |
+| `pets.getCustomFields()` | `GET /api/pets/custom-fields` |
+| `people.list(params)` | `GET /api/people?type=` |
+| `people.listAll(params)` | `GET /api/people?type=`, every page |
+| `people.get(id, type)` | `GET /api/people/{id}?type=` |
+| `people.create(input, options?)` | `POST /api/people` |
+| `people.getCustomFields(type)` | `GET /api/people/custom-fields?type=` |
+| `adoptionFees.get()` | `GET /api/adoption-fees` |
+| `contracts.get(type)` | `GET /api/contracts?type=` |
 
-| Alias                         | Use instead                     |
-| ----------------------------- | ------------------------------- |
-| `client.getPetById(...)`      | `client.pets.get(...)`          |
-| `client.findPets(...)`        | `client.pets.findMany(...)`     |
-| `cache.refreshFrequency`      | `cache.refreshFrequencyMinutes` |
-| `PetCreateInput.breeds`       | `PetCreateInput.breed`          |
-| `PetCreateInput.colors`       | `PetCreateInput.color`          |
-| `PetCreateInput.is_published` | `PetCreateInput.show_public`    |
-
----
-
-## Setup References
-
-### Node + TypeScript
-
-```typescript
-import { PawPlacerClient } from "pawplacer-sdk";
-
-export const pawplacer = new PawPlacerClient({
-  cache: { enabled: true, refreshFrequencyMinutes: 180 },
-});
-
-export async function getAvailablePets() {
-  return pawplacer.pets.list({ status: "available", limit: 12 });
-}
-```
-
-### Next.js App Router
-
-```typescript
-// app/api/pets/route.ts
-import { PawPlacerClient } from "pawplacer-sdk";
-
-const pawplacer = new PawPlacerClient({
-  cache: { enabled: true, refreshFrequencyMinutes: 60 },
-});
-
-export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const species = url.searchParams.get("species") ?? undefined;
-  const result = await pawplacer.pets.list({
-    status: "available",
-    species,
-    limit: 12,
-  });
-
-  return Response.json({
-    pets: result.data,
-    total: result.total,
-    hasMore: result.hasMore,
-  });
-}
-```
-
-Keep the SDK in API routes, server actions, server components, or `getServerSideProps`. Never use it in client components.
-
-### React + Vite
-
-```typescript
-// server/api/pets.ts
-import { PawPlacerClient } from "pawplacer-sdk";
-
-const pawplacer = new PawPlacerClient();
-
-export async function getAvailablePetsForReact(species?: string) {
-  const result = await pawplacer.pets.list({
-    status: "available",
-    species,
-    limit: 12,
-  });
-
-  return {
-    pets: result.data,
-    total: result.total,
-    hasMore: result.hasMore,
-  };
-}
-```
-
-```typescript
-// src/api/pets.ts
-export async function fetchAvailablePets(species?: string) {
-  const params = new URLSearchParams();
-  if (species) params.set("species", species);
-
-  const suffix = params.toString() ? `?${params.toString()}` : "";
-  const response = await fetch(`/api/pets${suffix}`);
-  if (!response.ok) throw new Error(`Failed to load pets: ${response.status}`);
-  return response.json();
-}
-```
-
-React apps should fetch from your own backend route. The SDK and `PAWPLACER_API_KEY` stay on the server.
-
-### CommonJS
-
-```javascript
-const { PawPlacerClient } = require("pawplacer-sdk");
-
-const pawplacer = new PawPlacerClient({
-  cache: { enabled: true, refreshFrequencyMinutes: 180 },
-});
-
-async function getAvailablePets() {
-  return pawplacer.pets.list({ status: "available", limit: 12 });
-}
-
-module.exports = { getAvailablePets, pawplacer };
-```
-
----
-
-## Types
-
-All types are exported directly:
-
-**Shared:** `CustomField`, `PaginatedResponse<T>`, `CreateOptions`, `ApiError`, `RateLimitInfo`, `ApiResponseMeta`
-
-**Pets:** `Pet`, `PetCreateInput`, `PetListParams`, `PetSpecies`, `PetAgeCategory`, `PetSex`, `PetSize`, `PetHealthStatus`, `PetCompatibility`, `PetTemperament`, `PetCustomField` (alias for `CustomField`), `CreatePetOptions` (alias for `CreateOptions`)
-
-**People:** `Person`, `PersonCreateInput`, `PersonListParams`, `PersonListResponse`, `PersonType`, `PersonStatus`, `PersonCustomField` (alias for `CustomField`), `PersonCustomFieldsResponse`, `CreatePersonOptions` (alias for `CreateOptions`)
-
-**Adoption Fees:** `AdoptionFeeEntry`, `AdoptionFeesResponse`
-
-**Contracts:** `ContractResponse`, `ContractType`
-
----
+All request and response types are exported, for example `Pet`, `PetCreateInput`, `PetUpdateInput`, `PetListParams`, `Person`, `PersonCreateInput`, `CustomField`, `WriteOptions`, and `ApiResponseMeta`.
 
 ## Examples
 
-- [`examples/basic-usage.ts`](./examples/basic-usage.ts): Node/TypeScript reference functions for reads, writes, idempotency keys, and errors.
-- [`examples/next-app-router.ts`](./examples/next-app-router.ts): Next.js App Router route handler and server action references.
-- [`examples/react-vite-server-reference.ts`](./examples/react-vite-server-reference.ts): React/Vite server API reference.
-- [`examples/react-vite-client-reference.ts`](./examples/react-vite-client-reference.ts): React/Vite browser fetch helper reference.
-- [`examples/commonjs-reference.cjs`](./examples/commonjs-reference.cjs): CommonJS reference functions with module exports.
+- [`basic-usage.ts`](./examples/basic-usage.ts): reads, paging, syncing pets from another system, applications, surrenders, and error handling.
+- [`next-app-router.ts`](./examples/next-app-router.ts): a Next.js route handler and server actions.
+- [`react-vite-server-reference.ts`](./examples/react-vite-server-reference.ts) and [`react-vite-client-reference.ts`](./examples/react-vite-client-reference.ts): a backend route that uses the SDK, and the browser code that calls it.
+- [`commonjs-reference.cjs`](./examples/commonjs-reference.cjs): `require` usage.
 
----
+## More
 
-## Resources
-
-- [SDK documentation](https://pawplacer.com/docs/integrations/sdk)
+- [SDK docs](https://pawplacer.com/docs/integrations/sdk)
 - [Developer API overview](https://pawplacer.com/docs/integrations/developer-api)
 - [OpenAPI spec](https://pawplacer.com/openapi/public-api-v1.yaml)

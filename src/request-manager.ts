@@ -1,260 +1,113 @@
-import type {
-  CacheManager,
-  CachePolicy,
-  CacheResolveResult,
-  CacheSnapshot,
-} from "./cache";
+import { HTTPError, type Options as KyOptions } from "ky";
+
+import type { CacheManager, FetchResult, Freshness } from "./cache";
 import { PawPlacerApiError } from "./errors";
-import type { ApiError, ApiResponseMeta, RateLimitInfo } from "./types";
+import type { ApiResponseMeta, RateLimitInfo } from "./types";
 
-export interface KyRequestOptions {
-  headers?: HeadersInit;
-  json?: unknown;
-  retry?: unknown;
-  searchParams?:
-    | string
-    | URLSearchParams
-    | Record<string, unknown>
-    | Array<[string, unknown]>;
-  [key: string]: unknown;
+export interface GetOptions {
+  searchParams?: URLSearchParams;
+  /** Cache key; defaults to the path plus query string. */
+  cacheKey?: string;
+  /** Skip the cache and fetch from the API. */
+  forceRefresh?: boolean;
 }
 
-interface RequestClient {
-  get(path: string, options?: KyRequestOptions): Promise<Response>;
-  post(path: string, options?: KyRequestOptions): Promise<Response>;
-  put(path: string, options?: KyRequestOptions): Promise<Response>;
-  patch(path: string, options?: KyRequestOptions): Promise<Response>;
-  delete(path: string, options?: KyRequestOptions): Promise<Response>;
+export interface WriteOptions {
+  json: unknown;
+  searchParams?: URLSearchParams;
+  /** `false` sends no key. Defaults to a random UUID. */
+  idempotencyKey?: string | false;
+  /** Retry on 5xx/429/timeouts. Defaults to true when an idempotency key is sent. */
+  retry?: boolean;
 }
 
-/**
- * Structural constructor input that accepts ky and compatible request clients
- * without leaking ky's ESM-only types into this package's declarations.
- */
-interface RequestClientInput {
-  get: (...args: never[]) => PromiseLike<Response>;
-  post: (...args: never[]) => PromiseLike<Response>;
-  put: (...args: never[]) => PromiseLike<Response>;
-  patch: (...args: never[]) => PromiseLike<Response>;
-  delete: (...args: never[]) => PromiseLike<Response>;
+function parseInteger(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-export interface RequestCacheOptions extends CachePolicy {
-  key?: string;
-  enabled?: boolean;
-  refreshFrequencyMinutes?: number;
-}
-
-export interface RequestOptions extends KyRequestOptions {
-  memoize?: RequestCacheOptions | false;
-  as?: "json" | "text" | "blob" | "response";
-}
-
-type RequestMethod = "get" | "post" | "put" | "patch" | "delete";
-
-function parseRateLimitHeaders(headers: Headers): RateLimitInfo | undefined {
-  const limit = headers.get("x-ratelimit-limit");
-  const remaining = headers.get("x-ratelimit-remaining");
-  const reset = headers.get("x-ratelimit-reset");
-
-  if (!limit || !remaining || !reset) {
-    return undefined;
-  }
-
-  const parsedLimit = Number.parseInt(limit, 10);
-  const parsedRemaining = Number.parseInt(remaining, 10);
-  const parsedReset = Number.parseInt(reset, 10);
+function parseRateLimit(headers: Headers): RateLimitInfo | undefined {
+  const limit = parseInteger(headers.get("x-ratelimit-limit"));
+  const remaining = parseInteger(headers.get("x-ratelimit-remaining"));
+  const reset = parseInteger(headers.get("x-ratelimit-reset"));
+  // The API sends `X-RateLimit-Remaining: -1` when it couldn't determine usage.
   if (
-    !Number.isFinite(parsedLimit) ||
-    !Number.isFinite(parsedRemaining) ||
-    !Number.isFinite(parsedReset)
+    limit === undefined ||
+    remaining === undefined ||
+    remaining < 0 ||
+    reset === undefined
   ) {
     return undefined;
   }
-
-  const parsed: RateLimitInfo = {
-    limit: parsedLimit,
-    remaining: parsedRemaining,
-    reset: parsedReset,
-  };
-
-  const retryAfter = headers.get("retry-after");
-  if (retryAfter) {
-    const parsedRetryAfter = Number.parseInt(retryAfter, 10);
-    if (Number.isFinite(parsedRetryAfter) && parsedRetryAfter >= 0) {
-      parsed.retryAfter = parsedRetryAfter;
-    }
+  const rateLimit: RateLimitInfo = { limit, remaining, reset };
+  const retryAfter = parseInteger(headers.get("retry-after"));
+  if (retryAfter !== undefined && retryAfter >= 0) {
+    rateLimit.retryAfter = retryAfter;
   }
-
-  return parsed;
+  return rateLimit;
 }
 
 function parseResponseMeta(headers: Headers): ApiResponseMeta {
   const meta: ApiResponseMeta = {};
-
   const requestId = headers.get("x-request-id");
   if (requestId) meta.requestId = requestId;
-
   const apiVersion = headers.get("x-api-version");
   if (apiVersion) meta.apiVersion = apiVersion;
-
   const generatedAt = headers.get("x-generated-at");
   if (generatedAt) meta.generatedAt = generatedAt;
-
-  const rateLimit = parseRateLimitHeaders(headers);
+  const rateLimit = parseRateLimit(headers);
   if (rateLimit) meta.rateLimit = rateLimit;
-
-  const idempotencyReplay = headers.get("idempotency-replay");
-  if (idempotencyReplay?.toLowerCase() === "true") {
+  if (headers.get("idempotency-replay")?.toLowerCase() === "true") {
     meta.idempotencyReplay = true;
   }
-
+  if (headers.get("x-pawplacer-sample-data")?.toLowerCase() === "true") {
+    meta.sampleData = true;
+  }
   return meta;
 }
 
-function parseCacheControlSeconds(
-  cacheControl: string | null,
-  directive: "max-age" | "stale-while-revalidate",
-): number | undefined {
-  if (!cacheControl) {
-    return undefined;
+/** Reads `max-age` and `stale-while-revalidate` from Cache-Control. */
+export function parseCacheControl(
+  value: string | null,
+): Partial<Freshness> | undefined {
+  if (!value) return undefined;
+  const directives = new Map<string, string | undefined>();
+  for (const part of value.toLowerCase().split(",")) {
+    const [name, arg] = part.trim().split("=");
+    if (name) directives.set(name, arg?.trim());
   }
-
-  const segment = cacheControl
-    .split(",")
-    .map((part) => part.trim())
-    .find((part) => part.toLowerCase().startsWith(`${directive}=`));
-
-  if (!segment) {
-    return undefined;
+  if (directives.has("no-store") || directives.has("no-cache")) {
+    return { maxAgeMs: 0, staleWhileRevalidateMs: 0 };
   }
-
-  const rawValue = segment.split("=")[1]?.trim();
-  if (!rawValue) {
-    return undefined;
-  }
-
-  const parsed = Number.parseInt(rawValue, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return undefined;
-  }
-
-  return parsed;
-}
-
-function parseResponseCachePolicy(headers: Headers): CachePolicy | undefined {
-  const cacheControl = headers.get("cache-control");
-  if (!cacheControl) {
-    return undefined;
-  }
-
-  const normalizedCacheControl = cacheControl.toLowerCase();
-  if (
-    normalizedCacheControl.includes("no-store") ||
-    normalizedCacheControl.includes("no-cache") ||
-    normalizedCacheControl.includes("max-age=0")
-  ) {
-    return {
-      refreshFrequencyMs: 0,
-      staleWhileRevalidateMs: 0,
-    };
-  }
-
-  const maxAgeSeconds = parseCacheControlSeconds(cacheControl, "max-age");
-  const staleWhileRevalidateSeconds = parseCacheControlSeconds(
-    cacheControl,
-    "stale-while-revalidate",
-  );
-
-  if (
-    maxAgeSeconds === undefined &&
-    staleWhileRevalidateSeconds === undefined
-  ) {
-    return undefined;
-  }
-
-  return {
-    refreshFrequencyMs:
-      maxAgeSeconds !== undefined ? maxAgeSeconds * 1000 : undefined,
-    staleWhileRevalidateMs:
-      staleWhileRevalidateSeconds !== undefined
-        ? (maxAgeSeconds ?? 0) * 1000 + staleWhileRevalidateSeconds * 1000
-        : undefined,
+  const seconds = (name: string) => {
+    const parsed = parseInteger(directives.get(name) ?? null);
+    return parsed !== undefined && parsed >= 0 ? parsed * 1000 : undefined;
   };
+  const freshness: Partial<Freshness> = {};
+  const maxAgeMs = seconds("max-age");
+  const staleWhileRevalidateMs = seconds("stale-while-revalidate");
+  if (maxAgeMs !== undefined) freshness.maxAgeMs = maxAgeMs;
+  if (staleWhileRevalidateMs !== undefined) {
+    freshness.staleWhileRevalidateMs = staleWhileRevalidateMs;
+  }
+  return Object.keys(freshness).length > 0 ? freshness : undefined;
 }
 
-function isNotModifiedResponse(
-  error: unknown,
-): error is { response: Response } {
-  if (error === null || typeof error !== "object") return false;
-  const resp = (error as Record<string, unknown>).response;
-  if (resp === null || typeof resp !== "object") return false;
-  return (resp as Record<string, unknown>).status === 304;
-}
+/**
+ * A ky instance, typed structurally so ky's ESM-only types stay out of the
+ * published declarations (CommonJS consumers can't import them).
+ */
+type HttpClient = (path: string, options: object) => Promise<Response>;
 
-function isMemoizationDisabled(memoize: RequestOptions["memoize"]): boolean {
-  return (
-    memoize === false ||
-    (typeof memoize === "object" && memoize?.enabled === false)
-  );
-}
-
-function getErrorResponse(error: unknown): Response | null {
-  if (error === null || typeof error !== "object") {
-    return null;
-  }
-
-  const response = (error as Record<string, unknown>).response;
-  if (response === null || typeof response !== "object") {
-    return null;
-  }
-
-  if (!("headers" in (response as Record<string, unknown>))) {
-    return null;
-  }
-
-  return response as Response;
-}
-
-function getApiError(error: unknown): ApiError | null {
-  if (error === null || typeof error !== "object") {
-    return null;
-  }
-
-  const apiError = (error as Record<string, unknown>).apiError;
-  if (apiError === null || typeof apiError !== "object") {
-    return null;
-  }
-
-  return apiError as ApiError;
-}
-
-function mergeHeaders(
-  options: KyRequestOptions,
-  extra: Record<string, string>,
-): KyRequestOptions {
-  const existing = options.headers;
-  if (!existing) {
-    return { ...options, headers: { ...extra } };
-  }
-
-  const cloned = new Headers(existing as HeadersInit);
-  for (const [key, value] of Object.entries(extra)) {
-    cloned.set(key, value);
-  }
-  return { ...options, headers: cloned };
-}
-
+/** Sends requests through ky, records response metadata, and applies the cache to GETs. */
 export class RequestManager {
-  private ky: RequestClient;
-  private cache: CacheManager | null;
-  private inFlight = new Map<string, Promise<unknown>>();
   private _lastResponseMeta: ApiResponseMeta = {};
-  private etags = new Map<string, string>();
-  private etagBodies = new Map<string, unknown>();
+  private ky: HttpClient;
+  private cache: CacheManager | null;
 
-  constructor(kyInstance: RequestClientInput, cache: CacheManager | null) {
-    this.ky = kyInstance as unknown as RequestClient;
+  constructor(ky: HttpClient, cache: CacheManager | null) {
+    this.ky = ky;
     this.cache = cache;
   }
 
@@ -262,317 +115,114 @@ export class RequestManager {
     return this._lastResponseMeta;
   }
 
-  async get<T>(path: string, options: RequestOptions = {}): Promise<T> {
-    return this.execute<T>("get", path, options);
-  }
-
-  async post<T>(path: string, options: RequestOptions = {}): Promise<T> {
-    return this.execute<T>("post", path, options);
-  }
-
-  async put<T>(path: string, options: RequestOptions = {}): Promise<T> {
-    return this.execute<T>("put", path, options);
-  }
-
-  async patch<T>(path: string, options: RequestOptions = {}): Promise<T> {
-    return this.execute<T>("patch", path, options);
-  }
-
-  async delete<T>(path: string, options: RequestOptions = {}): Promise<T> {
-    return this.execute<T>("delete", path, options);
-  }
-
-  invalidate(key: string): void {
-    this.cache?.delete(key);
-    this.etags.delete(key);
-    this.etagBodies.delete(key);
-  }
-
-  invalidateMatching(pattern: string | RegExp): void {
-    this.cache?.clearPattern(pattern);
-    const matcher =
-      typeof pattern === "string"
-        ? (key: string) => key.includes(pattern)
-        : (key: string) => pattern.test(key);
-    for (const key of this.etags.keys()) {
-      if (matcher(key)) {
-        this.etags.delete(key);
-      }
-    }
-    for (const key of this.etagBodies.keys()) {
-      if (matcher(key)) {
-        this.etagBodies.delete(key);
-      }
-    }
-  }
-
-  clearEtags(): void {
-    this.etags.clear();
-    this.etagBodies.clear();
-  }
-
-  stats(): CacheSnapshot | null {
+  async get<T>(path: string, options: GetOptions = {}): Promise<T> {
+    const { searchParams, forceRefresh } = options;
     if (!this.cache) {
-      return null;
+      const result = await this.fetchJson<T>(path, { searchParams });
+      return (result as { value: T }).value;
     }
-    return this.cache.stats();
+    const query = searchParams?.toString();
+    const key = options.cacheKey ?? (query ? `${path}?${query}` : path);
+    return this.cache.resolve<T>(
+      key,
+      (etag) =>
+        this.fetchJson<T>(path, {
+          searchParams,
+          // Omit `headers` entirely when unused: ky treats `headers: undefined` as
+          // "drop the instance headers", which would remove the API key.
+          ...(etag ? { headers: { "If-None-Match": etag } } : {}),
+        }),
+      { forceRefresh },
+    );
   }
 
-  private async execute<T>(
-    method: RequestMethod,
+  async post<T>(path: string, options: WriteOptions): Promise<T> {
+    return this.write<T>("post", path, options);
+  }
+
+  async patch<T>(path: string, options: WriteOptions): Promise<T> {
+    return this.write<T>("patch", path, options);
+  }
+
+  invalidate(pattern: string | RegExp): void {
+    this.cache?.deleteMatching(pattern);
+  }
+
+  clearCache(): void {
+    this.cache?.clear();
+  }
+
+  private async write<T>(
+    method: "post" | "patch",
     path: string,
-    options: RequestOptions,
+    { json, searchParams, idempotencyKey, retry }: WriteOptions,
   ): Promise<T> {
-    const { memoize, as, ...rest } = options;
-    const memoizationDisabled = isMemoizationDisabled(memoize);
-    const cacheOptions = memoizationDisabled
-      ? null
-      : this.resolveCacheOptions(method, path, memoize, rest);
-    const parser = as ?? "json";
-
-    if (method === "get" && cacheOptions && this.cache) {
-      return this.cache.resolve<T>(
-        cacheOptions.key,
-        () => this.dispatch<T>("get", path, rest, parser, cacheOptions.key),
-        {
-          refreshFrequencyMs: cacheOptions.refreshFrequencyMs,
-          staleWhileRevalidateMs: cacheOptions.staleWhileRevalidateMs,
-          forceRefresh: cacheOptions.forceRefresh,
-        },
-      );
-    }
-
-    const etagKey =
-      method === "get" && !memoizationDisabled && (!this.cache || !cacheOptions)
-        ? (cacheOptions?.key ?? this.buildCacheKey(method, path, rest))
-        : undefined;
-
-    const dedupeKey = this.buildDedupeKey(method, path, rest);
-    if (dedupeKey) {
-      const existing = this.inFlight.get(dedupeKey) as Promise<T> | undefined;
-      if (existing) {
-        return existing;
-      }
-      const request = this.dispatch<T>(
-        method,
-        path,
-        rest,
-        parser,
-        etagKey,
-      ).then((result) => this.extractDispatchValue(result));
-      this.inFlight.set(dedupeKey, request);
-      try {
-        return await request;
-      } finally {
-        this.inFlight.delete(dedupeKey);
-      }
-    }
-
-    const result = await this.dispatch<T>(method, path, rest, parser, etagKey);
-    return this.extractDispatchValue(result);
+    const key =
+      idempotencyKey === false
+        ? undefined
+        : (idempotencyKey ?? globalThis.crypto.randomUUID());
+    const shouldRetry = retry ?? key !== undefined;
+    const response = await this.send(method, path, {
+      json,
+      searchParams,
+      ...(key ? { headers: { "Idempotency-Key": key } } : {}),
+      // GET is the only method retried by default; writes opt in per request.
+      ...(shouldRetry ? { retry: { methods: [method] } } : {}),
+    });
+    return (await response.json()) as T;
   }
 
-  private async dispatch<T>(
-    method: RequestMethod,
+  private async fetchJson<T>(
     path: string,
-    options: KyRequestOptions,
-    parser: NonNullable<RequestOptions["as"]>,
-    cacheKey?: string,
-  ): Promise<T | CacheResolveResult<T>> {
-    let effectiveOptions = options;
-    if (method === "get" && cacheKey) {
-      const etag = this.etags.get(cacheKey);
-      if (etag) {
-        effectiveOptions = mergeHeaders(options, { "If-None-Match": etag });
-      }
-    }
-
-    const kyCall = (() => {
-      switch (method) {
-        case "get":
-          return this.ky.get(path, effectiveOptions);
-        case "post":
-          return this.ky.post(path, effectiveOptions);
-        case "put":
-          return this.ky.put(path, effectiveOptions);
-        case "patch":
-          return this.ky.patch(path, effectiveOptions);
-        case "delete":
-          return this.ky.delete(path, effectiveOptions);
-        default:
-          throw new Error(`Unsupported method: ${method}`);
-      }
-    })();
-
-    let response: Awaited<typeof kyCall>;
+    options: KyOptions,
+  ): Promise<FetchResult<T>> {
     try {
-      response = await kyCall;
+      const response = await this.send("get", path, options);
+      return {
+        notModified: false,
+        value: (await response.json()) as T,
+        etag: response.headers.get("etag") ?? undefined,
+        freshness: parseCacheControl(response.headers.get("cache-control")),
+      };
     } catch (error) {
-      const errorResponse = getErrorResponse(error);
-      if (errorResponse) {
-        this._lastResponseMeta = parseResponseMeta(errorResponse.headers);
+      if (error instanceof NotModified) {
+        return { notModified: true, freshness: error.freshness };
       }
-
-      if (isNotModifiedResponse(error) && cacheKey) {
-        const cached =
-          this.cache?.peek<T>(cacheKey) ??
-          (this.etagBodies.get(cacheKey) as T | undefined) ??
-          null;
-        if (cached !== null) {
-          return cached;
-        }
-      }
-
-      const apiError = getApiError(error);
-      if (apiError) {
-        throw new PawPlacerApiError(apiError);
-      }
-
       throw error;
     }
-
-    this._lastResponseMeta = parseResponseMeta(response.headers);
-
-    if (method === "get" && cacheKey) {
-      const etag = response.headers.get("etag");
-      if (etag) {
-        this.etags.set(cacheKey, etag);
-      }
-    }
-
-    if (parser === "json") {
-      const body = (await response.json()) as T;
-      if (method === "get" && cacheKey && !this.cache) {
-        this.etagBodies.set(cacheKey, body);
-      }
-      if (method === "get" && cacheKey && this.cache) {
-        return {
-          __cachePolicyResult: true,
-          value: body,
-          policy: parseResponseCachePolicy(response.headers),
-        };
-      }
-      return body;
-    }
-    if (parser === "text") {
-      return response.text() as unknown as Promise<T>;
-    }
-    if (parser === "blob") {
-      return response.blob() as unknown as Promise<T>;
-    }
-    return response as unknown as Promise<T>;
   }
 
-  private resolveCacheOptions(
-    method: RequestMethod,
+  private async send(
+    method: "get" | "post" | "patch",
     path: string,
-    memoize: RequestOptions["memoize"],
-    options: KyRequestOptions,
-  ) {
-    if (method !== "get") {
-      return null;
-    }
-    const policy = memoize && typeof memoize === "object" ? memoize : {};
-    const key = policy.key ?? this.buildCacheKey(method, path, options);
-    return {
-      key,
-      refreshFrequencyMs: this.resolveRefreshFrequencyMs(policy),
-      staleWhileRevalidateMs: policy.staleWhileRevalidateMs,
-      forceRefresh: policy.forceRefresh,
-    };
-  }
-
-  private resolveRefreshFrequencyMs(
-    policy: RequestCacheOptions,
-  ): number | undefined {
-    if (
-      policy.refreshFrequencyMs !== undefined &&
-      Number.isFinite(policy.refreshFrequencyMs)
-    ) {
-      return Math.max(policy.refreshFrequencyMs, 0);
-    }
-    if (
-      policy.refreshFrequencyMinutes !== undefined &&
-      Number.isFinite(policy.refreshFrequencyMinutes)
-    ) {
-      return Math.max(policy.refreshFrequencyMinutes, 0) * 60 * 1000;
-    }
-    return undefined;
-  }
-
-  private extractDispatchValue<T>(result: T | CacheResolveResult<T>): T {
-    if (
-      result !== null &&
-      typeof result === "object" &&
-      "__cachePolicyResult" in result
-    ) {
-      return (result as CacheResolveResult<T>).value;
-    }
-
-    return result as T;
-  }
-
-  private buildCacheKey(
-    method: RequestMethod,
-    path: string,
-    options: KyRequestOptions,
-  ): string {
-    const query = this.serializeSearchParams(options.searchParams);
-    return `${method.toUpperCase()}:${path}${query ? `?${query}` : ""}`;
-  }
-
-  private buildDedupeKey(
-    method: RequestMethod,
-    path: string,
-    options: KyRequestOptions,
-  ): string | null {
-    if (method !== "get") {
-      return null;
-    }
-    return this.buildCacheKey(method, path, options);
-  }
-
-  private serializeSearchParams(
-    input: KyRequestOptions["searchParams"],
-  ): string {
-    if (!input) {
-      return "";
-    }
-    if (typeof input === "string") {
-      return input.startsWith("?") ? input.slice(1) : input;
-    }
-    if (input instanceof URLSearchParams) {
-      return input.toString();
-    }
-    const params = new URLSearchParams();
-    const append = (key: string, value: unknown) => {
-      if (value === undefined || value === null) {
-        return;
+    options: KyOptions,
+  ): Promise<Response> {
+    try {
+      const response = await this.ky(path, { ...options, method });
+      this._lastResponseMeta = parseResponseMeta(response.headers);
+      return response;
+    } catch (error) {
+      if (!(error instanceof HTTPError)) throw error;
+      const { response } = error;
+      this._lastResponseMeta = parseResponseMeta(response.headers);
+      if (response.status === 304) {
+        throw new NotModified(
+          parseCacheControl(response.headers.get("cache-control")),
+        );
       }
-      if (Array.isArray(value)) {
-        value.forEach((item) => {
-          append(key, item);
-        });
-        return;
-      }
-      params.append(key, `${value}`);
-    };
-
-    if (Array.isArray(input)) {
-      for (const [key, value] of input as Array<[string, unknown]>) {
-        append(key, value);
-      }
-      return params.toString();
+      // ky 2 consumes the error body into `error.data` before rejecting.
+      throw PawPlacerApiError.from(
+        error.data,
+        response.status,
+        response.headers,
+        error,
+      );
     }
+  }
+}
 
-    const entries = Object.entries(input as Record<string, unknown>).sort(
-      ([a], [b]) => a.localeCompare(b),
-    );
-
-    for (const [key, value] of entries) {
-      append(key, value);
-    }
-
-    return params.toString();
+class NotModified extends Error {
+  constructor(readonly freshness?: Partial<Freshness>) {
+    super("Not Modified");
   }
 }

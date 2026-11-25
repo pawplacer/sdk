@@ -1,7 +1,7 @@
 import { isRecord } from "./internal";
 import type { ApiError } from "./types";
 
-function getMessage(value: unknown): string | null {
+function nonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -9,15 +9,19 @@ function getMessage(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * Normalizes a PawPlacer error body (`{ error, code, request_id, ... }`).
+ * Returns null when the payload doesn't look like an API error.
+ */
 export function normalizeApiError(payload: unknown): ApiError | null {
   if (!isRecord(payload)) {
     return null;
   }
 
   const message =
-    getMessage(payload.error) ??
-    getMessage(payload.message) ??
-    (Object.prototype.hasOwnProperty.call(payload, "errors")
+    nonEmptyString(payload.error) ??
+    nonEmptyString(payload.message) ??
+    (Object.hasOwn(payload, "errors")
       ? "Validation failed. Please check the request payload."
       : null);
 
@@ -25,43 +29,67 @@ export function normalizeApiError(payload: unknown): ApiError | null {
     return null;
   }
 
-  // Spread preserves extra keys the API may add in the future (e.g. `hint`, `docs`).
+  // Spread preserves extra keys the API may add (e.g. `hint`, `docs`).
   return {
     ...payload,
     message,
-    error: getMessage(payload.error) ?? message,
-    code: getMessage(payload.code) ?? "unknown",
-    request_id: getMessage(payload.request_id) ?? "unknown",
+    error: nonEmptyString(payload.error) ?? message,
+    code: nonEmptyString(payload.code) ?? "unknown",
+    request_id: nonEmptyString(payload.request_id) ?? "unknown",
   };
 }
 
+/**
+ * Thrown for every non-2xx response from the PawPlacer API.
+ *
+ * `code` and `requestId` come from the error body when the API returns one.
+ * For responses without a PawPlacer error body (for example a gateway 502),
+ * `code` is `http_<status>` and `requestId` falls back to the `x-request-id`
+ * header, or `"unknown"`.
+ */
 export class PawPlacerApiError extends Error {
+  readonly status: number;
   readonly code: string;
   readonly requestId: string;
-  readonly status?: number;
+  /** The normalized error body. Includes `errors`, `details`, `hint`, and `docs` when present. */
   readonly apiError: ApiError;
 
-  constructor(apiError: ApiError) {
-    super(apiError.message);
+  constructor(
+    apiError: ApiError,
+    status: number,
+    options?: { cause?: unknown },
+  ) {
+    super(apiError.message, options);
     this.name = "PawPlacerApiError";
+    this.status = status;
     this.code = apiError.code;
     this.requestId = apiError.request_id;
-    this.status = apiError.status;
-    this.apiError = apiError;
+    this.apiError = { ...apiError, status };
+  }
+
+  /** Builds an error from a raw error response body and status. */
+  static from(
+    body: unknown,
+    status: number,
+    headers?: Headers,
+    cause?: unknown,
+  ): PawPlacerApiError {
+    const headerRequestId = headers?.get("x-request-id") ?? undefined;
+    const normalized = normalizeApiError(body);
+    const apiError: ApiError = normalized ?? {
+      message: `PawPlacer API request failed with status ${status}`,
+      error: `HTTP ${status}`,
+      code: `http_${status}`,
+      request_id: headerRequestId ?? "unknown",
+    };
+    if (apiError.request_id === "unknown" && headerRequestId) {
+      apiError.request_id = headerRequestId;
+    }
+    return new PawPlacerApiError(apiError, status, { cause });
   }
 }
 
-export function throwApiError(apiError: ApiError): never {
-  throw new PawPlacerApiError(apiError);
-}
-
-export function throwIfApiError(payload: unknown): void {
-  const apiError = normalizeApiError(payload);
-  if (apiError) {
-    throwApiError(apiError);
-  }
-}
-
+/** Thrown when a 2xx response body doesn't match the shape the SDK expects. */
 export class PawPlacerResponseValidationError extends Error {
   readonly payload: unknown;
 

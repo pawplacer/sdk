@@ -1,26 +1,19 @@
+// Node/TypeScript reference. Each function takes a client so you can call it
+// from a script, a job, or an API route.
+
 import {
   PawPlacerApiError,
   PawPlacerClient,
+  type Pet,
   type PersonCreateInput,
   type PetCreateInput,
 } from "pawplacer-sdk";
 
-export function createPawPlacerClient(apiKey = process.env.PAWPLACER_API_KEY) {
-  const trimmedApiKey = apiKey?.trim();
-  if (!trimmedApiKey) {
-    throw new Error(
-      "Set PAWPLACER_API_KEY on the server. Generate a key in Settings > SDK & API.",
-    );
-  }
+// Reads PAWPLACER_API_KEY. Create one client per process and reuse it.
+export const pawplacer = new PawPlacerClient();
 
-  return new PawPlacerClient({
-    apiKey: trimmedApiKey,
-    cache: { enabled: true, refreshFrequencyMinutes: 180 },
-  });
-}
-
-export async function listAvailableDogs(pawplacer: PawPlacerClient) {
-  const result = await pawplacer.pets.list({
+export async function listAvailableDogs(client: PawPlacerClient) {
+  const result = await client.pets.list({
     status: "available",
     species: "dog",
     limit: 12,
@@ -30,32 +23,41 @@ export async function listAvailableDogs(pawplacer: PawPlacerClient) {
     pets: result.data,
     total: result.total,
     hasMore: result.hasMore,
-    rateLimit: pawplacer.lastResponseMeta.rateLimit,
+    rateLimit: client.lastResponseMeta.rateLimit,
   };
 }
 
-export async function loadPetProfile(
-  pawplacer: PawPlacerClient,
-  petId: string,
-) {
-  const pet = await pawplacer.pets.get(petId);
-  const fields = await pawplacer.pets.getCustomFields();
+// listAll pages through every result for you.
+export async function exportAllAvailablePets(client: PawPlacerClient) {
+  const pets: Pet[] = [];
+  for await (const pet of client.pets.listAll({ status: "available" })) {
+    pets.push(pet);
+  }
+  return pets;
+}
+
+export async function loadPetProfile(client: PawPlacerClient, petId: string) {
+  const [pet, fields] = await Promise.all([
+    client.pets.get(petId),
+    client.pets.getCustomFields(),
+  ]);
 
   return {
     pet,
-    customFieldKeys: fields.map((field) => field.field_key),
+    customFields: fields
+      .filter((field) => !field.hidden && !field.internal_only)
+      .map((field) => ({
+        label: field.label,
+        value: pet.custom_field_data[field.field_key],
+      })),
   };
 }
 
-export async function listPeopleByRole(pawplacer: PawPlacerClient) {
+export async function listActivePeople(client: PawPlacerClient) {
   const [adopters, fosters, volunteers] = await Promise.all([
-    pawplacer.people.list({ type: "adopter", status: "active", limit: 25 }),
-    pawplacer.people.list({ type: "foster", status: "active", limit: 25 }),
-    pawplacer.people.list({
-      type: "volunteer",
-      status: "active",
-      limit: 25,
-    }),
+    client.people.list({ type: "adopter", status: "active", limit: 25 }),
+    client.people.list({ type: "foster", status: "active", limit: 25 }),
+    client.people.list({ type: "volunteer", status: "active", limit: 25 }),
   ]);
 
   return {
@@ -65,23 +67,26 @@ export async function listPeopleByRole(pawplacer: PawPlacerClient) {
   };
 }
 
-export async function loadAccountReferenceData(pawplacer: PawPlacerClient) {
-  const [adoptionFees, adopterFields, contract] = await Promise.all([
-    pawplacer.adoptionFees.get(),
-    pawplacer.people.getCustomFields("adopter"),
-    pawplacer.contracts.get("adopter"),
+// Everything an adoption form needs: the questions, the contract to accept,
+// and the fee rules.
+export async function loadAdoptionFormData(client: PawPlacerClient) {
+  const [fields, contract, fees] = await Promise.all([
+    client.people.getCustomFields("adopter"),
+    client.contracts.get("adopter"),
+    client.adoptionFees.get(),
   ]);
 
   return {
-    adoptionFees,
-    adopterFieldKeys: adopterFields.map((field) => field.field_key),
-    adoptionContractMarkdown: contract.content,
+    fields: fields.filter((field) => !field.hidden && !field.internal_only),
+    contractMarkdown: contract.content,
+    fees,
   };
 }
 
 export async function submitAdoptionApplication(
-  pawplacer: PawPlacerClient,
+  client: PawPlacerClient,
   input: {
+    /** UUID generated once per form submission and reused on retries. */
     submissionId: string;
     petId: string;
     name: string;
@@ -90,29 +95,22 @@ export async function submitAdoptionApplication(
     answers: Record<string, unknown>;
   },
 ) {
-  // Render the adopter fields and contract returned by
-  // loadAccountReferenceData(), then call this only after the applicant has
-  // accepted the displayed contract.
-  return pawplacer.people.create(
+  // Only call this after the applicant has seen and accepted the contract
+  // from loadAdoptionFormData().
+  return client.people.create(
     {
       type: "adopter",
       name: input.name,
       email: input.email,
       phone: input.phone,
       custom_field_data: input.answers,
-      application: {
-        pet_ids: [input.petId],
-        terms_accepted: true,
-      },
+      application: { pet_ids: [input.petId], terms_accepted: true },
     },
-    {
-      // Keep this UUID stable when retrying the same browser submission.
-      idempotencyKey: input.submissionId,
-    },
+    { idempotencyKey: input.submissionId },
   );
 }
 
-export const petCreatePayload = {
+export const examplePet = {
   name: "Max",
   species: "dog",
   age_category: "young",
@@ -127,35 +125,32 @@ export const petCreatePayload = {
   adoption_fee: 250,
 } satisfies PetCreateInput;
 
-export async function createPetFromBackendJob(
-  pawplacer: PawPlacerClient,
-  externalPetId: string,
+// Stable keys make a re-run of the same job return the original result
+// instead of creating a duplicate pet.
+export async function syncPetFromYourSystem(
+  client: PawPlacerClient,
+  externalId: string,
+  pet: PetCreateInput,
 ) {
-  return pawplacer.pets.create(petCreatePayload, {
-    idempotencyKey: `pet-sync:${externalPetId}`,
-  });
-}
-
-export async function updatePetFromWebsiteSync(
-  pawplacer: PawPlacerClient,
-  externalPetId: string,
-) {
-  return pawplacer.pets.update(
-    externalPetId,
-    {
-      description: "Updated bio from the website CMS.",
-      status: "available",
-      image_urls: ["https://example.com/max.jpg"],
-      show_public: true,
-      custom_id: externalPetId,
-    },
-    {
-      idempotencyKey: `pet-sync:${externalPetId}:update`,
-    },
+  return client.pets.create(
+    { ...pet, custom_id: externalId },
+    { idempotencyKey: `pet-sync:${externalId}` },
   );
 }
 
-export const surrenderCreatePayload = {
+// Updates accept the custom_id you assigned. Send only what changed.
+export async function updatePetFromYourSystem(
+  client: PawPlacerClient,
+  externalId: string,
+  changes: { description?: string; imageUrls?: string[] },
+) {
+  return client.pets.update(externalId, {
+    description: changes.description,
+    image_urls: changes.imageUrls,
+  });
+}
+
+export const exampleSurrender = {
   type: "surrender",
   name: "Sam Surrender",
   email: "sam@example.com",
@@ -169,7 +164,6 @@ export const surrenderCreatePayload = {
         sex: "male",
         size: "large",
         status: "intake",
-        health: "unknown",
         breed: ["Lab Mix"],
       },
       reason: "Moving",
@@ -179,20 +173,18 @@ export const surrenderCreatePayload = {
 } satisfies PersonCreateInput;
 
 export async function createSurrenderIntake(
-  pawplacer: PawPlacerClient,
+  client: PawPlacerClient,
   intakeId: string,
 ) {
-  return pawplacer.people.create(surrenderCreatePayload, {
+  return client.people.create(exampleSurrender, {
     idempotencyKey: `surrender-intake:${intakeId}`,
   });
 }
 
-export function formatPawPlacerError(error: unknown) {
+export function describeError(error: unknown): string {
   if (error instanceof PawPlacerApiError) {
-    return `PawPlacer API error ${error.status}: [${error.code}] ${error.message}`;
+    // error.requestId is what PawPlacer support will ask for.
+    return `PawPlacer API ${error.status} ${error.code}: ${error.message} (request ${error.requestId})`;
   }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
+  return error instanceof Error ? error.message : String(error);
 }

@@ -1,6 +1,6 @@
 {
   "name": "pawplacer-sdk",
-  "version": "1.6.2",
+  "version": "2.0.0",
   "description": "PawPlacer API SDK for TypeScript/JavaScript",
   "sideEffects": false,
   "main": "./dist/index.js",
@@ -44,7 +44,7 @@
   },
   "homepage": "https://github.com/pawplacer/sdk#readme",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
   },
   "dependencies": {
     "ky": "^2.0.2"

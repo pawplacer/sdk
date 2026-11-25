@@ -1,251 +1,197 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CacheManager } from "../src/cache";
+import { CacheManager, type FetchResult } from "../src/cache";
+import { parseCacheControl } from "../src/request-manager";
+
+const fresh = <T>(value: T, extra: Partial<FetchResult<T>> = {}) =>
+  ({ notModified: false, value, ...extra }) as FetchResult<T>;
+
+const FRESHNESS = { maxAgeMs: 1000, staleWhileRevalidateMs: 5000 };
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("CacheManager", () => {
-  let cache: CacheManager;
+  it("serves fresh entries without fetching", async () => {
+    const cache = new CacheManager({ defaultFreshness: FRESHNESS });
+    const fetcher = vi.fn().mockResolvedValue(fresh("a"));
 
-  beforeEach(() => {
-    cache = new CacheManager({
-      refreshFrequencyMs: 1000,
-      maxSize: 5,
-    });
+    await cache.resolve("k", fetcher);
+    const value = await cache.resolve("k", fetcher);
+
+    expect(value).toBe("a");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(cache.stats()).toMatchObject({ hits: 1, misses: 1, size: 1 });
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  it("serves stale entries while revalidating in the background", async () => {
+    const cache = new CacheManager({ defaultFreshness: FRESHNESS });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(fresh("a"))
+      .mockResolvedValueOnce(fresh("b"));
+
+    await cache.resolve("k", fetcher);
+    vi.advanceTimersByTime(2000);
+    const stale = await cache.resolve("k", fetcher);
+    await vi.runAllTimersAsync();
+    const updated = await cache.resolve("k", fetcher);
+
+    expect(stale).toBe("a");
+    expect(updated).toBe("b");
+    expect(cache.stats().refreshes).toBe(1);
   });
 
-  describe("set / get", () => {
-    it("stores and retrieves a value", () => {
-      cache.set("key-1", { name: "Buddy" });
-      expect(cache.get("key-1")).toEqual({ name: "Buddy" });
-    });
+  it("fetches in the foreground once the stale window has passed", async () => {
+    const cache = new CacheManager({ defaultFreshness: FRESHNESS });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(fresh("a"))
+      .mockResolvedValueOnce(fresh("b"));
 
-    it("returns null for missing key", () => {
-      expect(cache.get("missing")).toBeNull();
-    });
+    await cache.resolve("k", fetcher);
+    vi.advanceTimersByTime(7000);
 
-    it("returns null for expired + stale entry", () => {
-      vi.useFakeTimers();
-      cache.set("key-1", "value");
-      // Default stale = refreshFrequencyMs * 3 = 3000ms
-      vi.advanceTimersByTime(4000);
-      expect(cache.get("key-1")).toBeNull();
-      vi.useRealTimers();
-    });
-
-    it("returns value within fresh window", () => {
-      vi.useFakeTimers();
-      cache.set("key-1", "value");
-      vi.advanceTimersByTime(500); // Within 1000ms fresh window
-      expect(cache.get("key-1")).toBe("value");
-      vi.useRealTimers();
-    });
+    expect(await cache.resolve("k", fetcher)).toBe("b");
   });
 
-  describe("resolve", () => {
-    it("calls fetcher on cache miss", async () => {
-      const fetcher = vi.fn().mockResolvedValue({ id: 1 });
-      const result = await cache.resolve("key", fetcher);
+  it("keeps serving the old value when a refresh fails", async () => {
+    const cache = new CacheManager({ defaultFreshness: FRESHNESS });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(fresh("a"))
+      .mockRejectedValue(new Error("down"));
 
-      expect(fetcher).toHaveBeenCalledOnce();
-      expect(result).toEqual({ id: 1 });
-    });
+    await cache.resolve("k", fetcher);
+    vi.advanceTimersByTime(7000);
 
-    it("returns cached value on cache hit", async () => {
-      const fetcher = vi.fn().mockResolvedValue({ id: 1 });
+    expect(await cache.resolve("k", fetcher)).toBe("a");
+  });
 
-      await cache.resolve("key", fetcher);
-      const result = await cache.resolve("key", fetcher);
+  it("throws fetch errors when there is no value, and on forceRefresh", async () => {
+    const cache = new CacheManager({ defaultFreshness: FRESHNESS });
 
-      expect(fetcher).toHaveBeenCalledOnce();
-      expect(result).toEqual({ id: 1 });
-    });
+    await expect(
+      cache.resolve("k", () => Promise.reject(new Error("down"))),
+    ).rejects.toThrow("down");
+    expect(cache.stats().size).toBe(0);
 
-    it("refetches when forceRefresh is true", async () => {
-      const fetcher = vi
-        .fn()
-        .mockResolvedValueOnce({ id: 1 })
-        .mockResolvedValueOnce({ id: 2 });
-
-      await cache.resolve("key", fetcher);
-      const result = await cache.resolve("key", fetcher, {
+    await cache.resolve("k", () => Promise.resolve(fresh("a")));
+    await expect(
+      cache.resolve("k", () => Promise.reject(new Error("down")), {
         forceRefresh: true,
-      });
-
-      expect(fetcher).toHaveBeenCalledTimes(2);
-      expect(result).toEqual({ id: 2 });
-    });
-
-    it("returns stale value and revalidates in background", async () => {
-      vi.useFakeTimers();
-      const fetcher = vi
-        .fn()
-        .mockResolvedValueOnce("fresh")
-        .mockResolvedValueOnce("refreshed");
-
-      await cache.resolve("key", fetcher);
-      // Move past fresh window but within stale window
-      vi.advanceTimersByTime(1500);
-      const result = await cache.resolve("key", fetcher);
-
-      expect(result).toBe("fresh"); // Returns stale value immediately
-      expect(fetcher).toHaveBeenCalledTimes(2); // But triggers background refresh
-      vi.useRealTimers();
-    });
-
-    it("falls back to stale value when background refresh fails", async () => {
-      vi.useFakeTimers();
-      const fetcher = vi
-        .fn()
-        .mockResolvedValueOnce("original")
-        .mockRejectedValueOnce(new Error("network error"));
-
-      await cache.resolve("key", fetcher);
-      vi.advanceTimersByTime(1500);
-
-      // Returns stale value while background refresh fails gracefully
-      const result = await cache.resolve("key", fetcher);
-      expect(result).toBe("original");
-      expect(fetcher).toHaveBeenCalledTimes(2);
-
-      // Let the background promise settle
-      await vi.advanceTimersByTimeAsync(0);
-      vi.useRealTimers();
-    });
+      }),
+    ).rejects.toThrow("down");
   });
 
-  describe("peek", () => {
-    it("returns value regardless of expiry", () => {
-      vi.useFakeTimers();
-      cache.set("key-1", "value");
-      // Move past stale window
-      vi.advanceTimersByTime(10000);
-      // peek returns the value even though it's expired
-      expect(cache.peek("key-1")).toBe("value");
-      // Regular get returns null (and deletes the entry)
-      expect(cache.get("key-1")).toBeNull();
-      vi.useRealTimers();
-    });
+  it("shares one in-flight fetch between concurrent callers", async () => {
+    const cache = new CacheManager();
+    const fetcher = vi.fn().mockResolvedValue(fresh("a"));
 
-    it("returns null for missing key", () => {
-      expect(cache.peek("missing")).toBeNull();
-    });
+    const results = await Promise.all([
+      cache.resolve("k", fetcher),
+      cache.resolve("k", fetcher),
+    ]);
 
-    it("returns value within fresh window", () => {
-      cache.set("key-1", { name: "Buddy" });
-      expect(cache.peek("key-1")).toEqual({ name: "Buddy" });
-    });
+    expect(results).toEqual(["a", "a"]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  describe("delete / clear", () => {
-    it("deletes a specific key", () => {
-      cache.set("a", 1);
-      cache.set("b", 2);
-      cache.delete("a");
+  it("revalidates with the stored ETag and keeps the value on 304", async () => {
+    const cache = new CacheManager({ defaultFreshness: FRESHNESS });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(fresh("a", { etag: '"v1"' }))
+      .mockResolvedValueOnce({ notModified: true });
 
-      expect(cache.get("a")).toBeNull();
-      expect(cache.get("b")).toBe(2);
-    });
+    await cache.resolve("k", fetcher);
+    vi.advanceTimersByTime(7000);
+    const value = await cache.resolve("k", fetcher);
 
-    it("clears all entries", () => {
-      cache.set("a", 1);
-      cache.set("b", 2);
-      cache.clear();
-
-      expect(cache.size()).toBe(0);
-    });
+    expect(fetcher).toHaveBeenLastCalledWith('"v1"');
+    expect(value).toBe("a");
   });
 
-  describe("clearPattern", () => {
-    it("clears entries matching a string pattern", () => {
-      cache.set("pets:list:a", 1);
-      cache.set("pets:list:b", 2);
-      cache.set("pets:get:1", 3);
-
-      cache.clearPattern("pets:list:");
-
-      expect(cache.get("pets:list:a")).toBeNull();
-      expect(cache.get("pets:list:b")).toBeNull();
-      expect(cache.get("pets:get:1")).toBe(3);
+  it("uses response freshness, unless maxAgeOverrideMs is set", async () => {
+    const fromResponse = fresh("a", {
+      freshness: { maxAgeMs: 0, staleWhileRevalidateMs: 0 },
     });
 
-    it("treats string patterns as literal substrings instead of regexes", () => {
-      cache.set("pets:list:a", 1);
-      cache.set("petsXlistXb", 2);
+    const following = new CacheManager();
+    await following.resolve("k", () => Promise.resolve(fromResponse));
+    expect(following.stats().size).toBe(0);
 
-      cache.clearPattern("pets:list:");
-
-      expect(cache.get("pets:list:a")).toBeNull();
-      expect(cache.get("petsXlistXb")).toBe(2);
-    });
-
-    it("clears entries matching a RegExp", () => {
-      cache.set("pets:list:a", 1);
-      cache.set("pets:get:1", 2);
-      cache.set("users:list:a", 3);
-
-      cache.clearPattern(/^pets:/);
-
-      expect(cache.get("pets:list:a")).toBeNull();
-      expect(cache.get("pets:get:1")).toBeNull();
-      expect(cache.get("users:list:a")).toBe(3);
-    });
+    const overridden = new CacheManager({ maxAgeOverrideMs: 60_000 });
+    const fetcher = vi.fn().mockResolvedValue(fromResponse);
+    await overridden.resolve("k", fetcher);
+    await overridden.resolve("k", fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  describe("eviction", () => {
-    it("evicts oldest entries when maxSize exceeded", () => {
-      for (let i = 0; i < 7; i++) {
-        cache.set(`key-${i}`, i);
-      }
-      // maxSize is 5, so oldest should be evicted
-      expect(cache.size()).toBe(5);
-    });
+  it("does not store results for keys invalidated mid-request", async () => {
+    const cache = new CacheManager();
+    let release: (value: FetchResult<string>) => void = () => {};
+    const pending = cache.resolve(
+      "k",
+      () => new Promise<FetchResult<string>>((resolve) => (release = resolve)),
+    );
 
-    it("treats negative maxSize as zero capacity", () => {
-      const zeroCapacityCache = new CacheManager({ maxSize: -1 });
+    cache.delete("k");
+    release(fresh("old"));
+    await pending;
 
-      zeroCapacityCache.set("key", "value");
-
-      expect(zeroCapacityCache.stats().maxSize).toBe(0);
-      expect(zeroCapacityCache.peek("key")).toBeNull();
-    });
+    expect(cache.stats().size).toBe(0);
   });
 
-  describe("stats", () => {
-    it("tracks hits and misses", async () => {
-      const fetcher = vi.fn().mockResolvedValue("val");
+  it("evicts the least recently used entry past maxSize", async () => {
+    const cache = new CacheManager({ maxSize: 2 });
+    const load = (key: string) =>
+      cache.resolve(key, () => Promise.resolve(fresh(key)));
+    const fetcher = vi.fn().mockResolvedValue(fresh("reloaded"));
 
-      await cache.resolve("key", fetcher); // miss
-      await cache.resolve("key", fetcher); // hit
+    await load("a");
+    await load("b");
+    await load("a"); // touch a
+    await load("c"); // evicts b
 
-      const stats = cache.stats();
-      expect(stats.misses).toBe(1);
-      expect(stats.hits).toBe(1);
-      expect(stats.size).toBe(1);
-      expect(stats.maxSize).toBe(5);
-    });
+    expect(cache.stats().size).toBe(2);
+    expect(await cache.resolve("a", fetcher)).toBe("a");
+    expect(await cache.resolve("b", fetcher)).toBe("reloaded");
+  });
 
-    it("does not keep entries when the cache policy disables storage", () => {
-      cache.set("key", "value", {
-        refreshFrequencyMs: 0,
-        staleWhileRevalidateMs: 0,
-      });
+  it("deleteMatching supports substrings and regexes", async () => {
+    const cache = new CacheManager();
+    for (const key of ["pets:list:a", "pets:get:1", "people:list:b"]) {
+      await cache.resolve(key, () => Promise.resolve(fresh(key)));
+    }
 
-      expect(cache.get("key")).toBeNull();
-      expect(cache.peek("key")).toBeNull();
-    });
+    cache.deleteMatching("pets:list:");
+    expect(cache.stats().size).toBe(2);
+    cache.deleteMatching(/^people:/);
+    expect(cache.stats().size).toBe(1);
+    cache.clear();
+    expect(cache.stats().size).toBe(0);
+  });
+});
 
-    it("falls back to default TTLs for invalid constructor settings", () => {
-      const invalidSettingsCache = new CacheManager({
-        refreshFrequencyMs: Number.NaN,
-        staleWhileRevalidateMs: Number.NaN,
-      });
-
-      invalidSettingsCache.set("key", "value");
-
-      expect(invalidSettingsCache.peek("key")).toBe("value");
-    });
+describe("parseCacheControl", () => {
+  it.each([
+    [null, undefined],
+    ["public", undefined],
+    [
+      "private, max-age=60, stale-while-revalidate=300",
+      { maxAgeMs: 60_000, staleWhileRevalidateMs: 300_000 },
+    ],
+    ["max-age=0", { maxAgeMs: 0 }],
+    ["no-store", { maxAgeMs: 0, staleWhileRevalidateMs: 0 }],
+    ["No-Cache", { maxAgeMs: 0, staleWhileRevalidateMs: 0 }],
+    ["max-age=abc", undefined],
+  ])("%s", (header, expected) => {
+    expect(parseCacheControl(header)).toEqual(expected);
   });
 });

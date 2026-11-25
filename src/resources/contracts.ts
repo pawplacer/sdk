@@ -1,31 +1,21 @@
-import { throwIfApiError } from "../errors";
-import type { JsonRecord } from "../internal";
 import type { RequestManager } from "../request-manager";
-import type { ContractResponse, ContractType } from "../types";
+import { CONTRACT_TYPES, type ContractResponse, type ContractType } from "../types";
 import { validateContractResponse } from "../validation";
-
-const VALID_CONTRACT_TYPES: ContractType[] = [
-  "adopter",
-  "foster",
-  "volunteer",
-  "surrender",
-];
 
 export class ContractsApi {
   constructor(private requests: RequestManager) {}
 
-  /** Fetch terms & conditions markdown for a contract type. */
+  /** Fetch the terms & conditions markdown for a contract type. */
   async get(type: ContractType): Promise<ContractResponse> {
-    if (!type || !VALID_CONTRACT_TYPES.includes(type)) {
+    if (!CONTRACT_TYPES.includes(type)) {
       throw new Error(
-        'Contract type is required. Must be "adopter", "foster", "volunteer", or "surrender".',
+        `Contract type is required. Must be one of: ${CONTRACT_TYPES.join(", ")}.`,
       );
     }
-    const response = await this.requests.get<JsonRecord>("api/contracts", {
+    const response = await this.requests.get("api/contracts", {
       searchParams: new URLSearchParams({ type }),
-      memoize: { key: `contracts:${type}`, refreshFrequencyMinutes: 15 },
+      cacheKey: `contracts:${type}`,
     });
-    throwIfApiError(response);
     return validateContractResponse(response);
   }
 }

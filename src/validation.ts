@@ -1,6 +1,5 @@
 import { PawPlacerResponseValidationError } from "./errors";
-import type { JsonRecord } from "./internal";
-import { isRecord } from "./internal";
+import { isRecord, type JsonRecord } from "./internal";
 import type {
   AdoptionFeeEntry,
   AdoptionFeesResponse,
@@ -14,390 +13,280 @@ import type {
   PetCustomFieldsResponse,
 } from "./types";
 
+// These checks guard against API drift: they confirm the fields the SDK's
+// types promise are present with the right primitive types, and pass extra
+// fields through untouched.
+
+type Kind = "string" | "number" | "boolean" | "string[]" | "object";
+
+/** `kind` = required; `kind?` = may be absent; `kind|null` = may be null; `kind?|null` = either. */
+type Spec = Record<string, `${Kind}${"" | "?"}${"" | "|null"}`>;
+
 function fail(message: string, payload: unknown): never {
   throw new PawPlacerResponseValidationError(message, payload);
 }
 
+function matchesKind(value: unknown, kind: Kind): boolean {
+  switch (kind) {
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "string[]":
+      return (
+        Array.isArray(value) && value.every((item) => typeof item === "string")
+      );
+    case "object":
+      return isRecord(value);
+  }
+}
+
 function expectRecord(value: unknown, context: string): JsonRecord {
-  if (!isRecord(value)) {
-    fail(`${context} must be an object`, value);
-  }
+  if (!isRecord(value)) fail(`${context} must be an object`, value);
   return value;
 }
 
-function expectString(
+function checkShape<T>(payload: unknown, spec: Spec, context: string): T {
+  const record = expectRecord(payload, context);
+  for (const [key, rule] of Object.entries(spec)) {
+    const value = record[key];
+    const nullable = rule.endsWith("|null");
+    const optional = rule.includes("?");
+    const kind = rule.replace("|null", "").replace("?", "") as Kind;
+    if (value === undefined && optional) continue;
+    if (value === null && nullable) continue;
+    if (!matchesKind(value, kind)) {
+      fail(`${context}.${key} must be ${rule.replace("?", " (optional)")}`, record);
+    }
+  }
+  return record as T;
+}
+
+function expectArray(
   record: JsonRecord,
   key: string,
   context: string,
-): string {
+): unknown[] {
   const value = record[key];
-  if (typeof value !== "string") {
-    fail(`${context}.${key} must be a string`, record);
-  }
+  if (!Array.isArray(value)) fail(`${context}.${key} must be an array`, record);
   return value;
 }
 
-function expectNullableString(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): string | null {
-  const value = record[key];
-  if (value === null) {
-    return null;
-  }
-  if (typeof value !== "string") {
-    fail(`${context}.${key} must be a string or null`, record);
-  }
-  return value;
+function checkPage(record: JsonRecord, context: string) {
+  return checkShape<{
+    total: number;
+    limit: number;
+    offset: number;
+    hasMore: boolean;
+  }>(
+    record,
+    { total: "number", limit: "number", offset: "number", hasMore: "boolean" },
+    context,
+  );
 }
 
-function expectOptionalNullableString(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): string | null | undefined {
-  const value = record[key];
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value === null) {
-    return null;
-  }
-  if (typeof value !== "string") {
-    fail(`${context}.${key} must be a string, null, or undefined`, record);
-  }
-  return value;
-}
+// ---------------------------------------------------------------------------
+// Pets
+// ---------------------------------------------------------------------------
 
-function expectBoolean(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): boolean {
-  const value = record[key];
-  if (typeof value !== "boolean") {
-    fail(`${context}.${key} must be a boolean`, record);
-  }
-  return value;
-}
-
-function expectOptionalBoolean(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): boolean | undefined {
-  const value = record[key];
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== "boolean") {
-    fail(`${context}.${key} must be a boolean or undefined`, record);
-  }
-  return value;
-}
-
-function expectOptionalNumber(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): number | undefined {
-  const value = record[key];
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    fail(`${context}.${key} must be a finite number or undefined`, record);
-  }
-  return value;
-}
-
-function expectNumber(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): number {
-  const value = record[key];
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    fail(`${context}.${key} must be a finite number`, record);
-  }
-  return value;
-}
-
-function expectStringArray(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): string[] {
-  const value = record[key];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    fail(`${context}.${key} must be an array of strings`, record);
-  }
-  return value;
-}
-
-function expectJsonRecord(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): JsonRecord {
-  const value = record[key];
-  if (!isRecord(value)) {
-    fail(`${context}.${key} must be an object`, record);
-  }
-  return value;
-}
-
-function expectNullableNumber(
-  record: JsonRecord,
-  key: string,
-  context: string,
-): number | null {
-  const value = record[key];
-  if (value === null) {
-    return null;
-  }
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    fail(`${context}.${key} must be a finite number or null`, record);
-  }
-  return value;
-}
+const PET_SPEC: Spec = {
+  id: "string",
+  name: "string",
+  species: "string",
+  age_category: "string",
+  sex: "string",
+  size: "string",
+  status: "string",
+  health: "string",
+  breed: "string[]",
+  color: "string[]",
+  age_years: "string|null",
+  age_months: "string|null",
+  age_birthday: "string|null",
+  description: "string",
+  spayed: "boolean",
+  adoption_fee: "string",
+  global_adoption_fee: "number?|null",
+  microchip_id: "string|null",
+  good_with: "string[]",
+  bad_with: "string[]",
+  temperaments: "string[]",
+  image_urls: "string[]",
+  image_url: "string|null",
+  coat_length: "string|null",
+  custom_field_data: "object",
+  custom_id: "string|null",
+  intake_date: "string|null",
+  outcome_date: "string|null",
+  primary_veterinarian: "string|null",
+  show_public: "boolean",
+  special_needs: "string[]",
+  tags: "string[]",
+  status_change_notes: "string|null",
+  weight: "string|null",
+  adopted_by: "string|null",
+  adopted_on: "string|null",
+  hold_until: "string?|null",
+  is_sample: "boolean?",
+  created_at: "string",
+  updated_at: "string",
+};
 
 export function validatePet(payload: unknown, context = "pet"): Pet {
-  const pet = expectRecord(payload, context);
-
-  // Core identity
-  expectString(pet, "id", context);
-  expectString(pet, "name", context);
-  expectString(pet, "species", context);
-  expectString(pet, "age_category", context);
-  expectString(pet, "sex", context);
-  expectString(pet, "size", context);
-  expectString(pet, "status", context);
-  expectString(pet, "health", context);
-
-  // Profile data
-  expectStringArray(pet, "breed", context);
-  expectStringArray(pet, "color", context);
-  expectNullableString(pet, "age_years", context);
-  expectNullableString(pet, "age_months", context);
-  expectNullableString(pet, "age_birthday", context);
-  expectString(pet, "description", context);
-  expectBoolean(pet, "spayed", context);
-  expectString(pet, "adoption_fee", context);
-  if ("global_adoption_fee" in pet) {
-    expectNullableNumber(pet, "global_adoption_fee", context);
-  }
-  expectNullableString(pet, "microchip_id", context);
-  expectStringArray(pet, "good_with", context);
-  expectStringArray(pet, "bad_with", context);
-  expectStringArray(pet, "temperaments", context);
-  expectStringArray(pet, "image_urls", context);
-  expectNullableString(pet, "image_url", context);
-  expectNullableString(pet, "coat_length", context);
-  expectJsonRecord(pet, "custom_field_data", context);
-  expectNullableString(pet, "custom_id", context);
-  expectNullableString(pet, "intake_date", context);
-  expectNullableString(pet, "outcome_date", context);
-  expectNullableString(pet, "primary_veterinarian", context);
-  expectBoolean(pet, "show_public", context);
-  expectStringArray(pet, "special_needs", context);
-  expectStringArray(pet, "tags", context);
-  expectNullableString(pet, "status_change_notes", context);
-  expectNullableString(pet, "weight", context);
-  expectNullableString(pet, "adopted_by", context);
-  expectNullableString(pet, "adopted_on", context);
-  expectString(pet, "created_at", context);
-  expectString(pet, "updated_at", context);
-
-  return pet as unknown as Pet;
+  return checkShape<Pet>(payload, PET_SPEC, context);
 }
 
-export function validatePetListResponse(payload: unknown): {
-  pets: Pet[];
-  total: number;
-  limit: number;
-  offset: number;
-  hasMore: boolean;
-} {
-  const response = expectRecord(payload, "pets list response");
-  const pets = response.pets;
-
-  if (!Array.isArray(pets)) {
-    fail("pets list response.pets must be an array", response);
-  }
-
+export function validatePetListResponse(payload: unknown) {
+  const context = "pets list response";
+  const response = expectRecord(payload, context);
   return {
-    pets: pets.map((pet, index) => validatePet(pet, `pets[${index}]`)),
-    total: expectNumber(response, "total", "pets list response"),
-    limit: expectNumber(response, "limit", "pets list response"),
-    offset: expectNumber(response, "offset", "pets list response"),
-    hasMore: expectBoolean(response, "hasMore", "pets list response"),
+    pets: expectArray(response, "pets", context).map((pet, index) =>
+      validatePet(pet, `pets[${index}]`),
+    ),
+    ...checkPage(response, context),
   };
 }
 
-function validateCustomField(payload: unknown, context: string): CustomField {
-  const field = expectRecord(payload, context);
+// ---------------------------------------------------------------------------
+// Custom fields
+// ---------------------------------------------------------------------------
 
-  expectString(field, "field_key", context);
-  expectString(field, "label", context);
-  expectString(field, "field_type", context);
-  expectBoolean(field, "required", context);
-  expectOptionalNullableString(field, "help_text", context);
-  expectOptionalNullableString(field, "placeholder", context);
-  expectOptionalNullableString(field, "sync_to_column", context);
-  expectOptionalNullableString(field, "template_id", context);
-  expectOptionalNullableString(field, "section_id", context);
-  expectOptionalNullableString(field, "section", context);
-  expectOptionalNumber(field, "section_order", context);
-  expectOptionalNumber(field, "field_order", context);
-  expectOptionalBoolean(field, "hidden", context);
-  expectOptionalBoolean(field, "internal_only", context);
+const CUSTOM_FIELD_SPEC: Spec = {
+  field_key: "string",
+  label: "string",
+  field_type: "string",
+  required: "boolean",
+  help_text: "string?|null",
+  placeholder: "string?|null",
+  sync_to_column: "string?|null",
+  template_id: "string?|null",
+  section_id: "string?|null",
+  section: "string?|null",
+  section_order: "number?",
+  field_order: "number?",
+  hidden: "boolean?",
+  internal_only: "boolean?",
+};
 
-  return field as unknown as CustomField;
-}
-
-function validateCustomFieldArray(
-  payload: unknown,
+function validateCustomFields(
+  response: JsonRecord,
   context: string,
 ): CustomField[] {
-  if (!Array.isArray(payload)) {
-    fail(`${context}.custom_fields must be an array`, payload);
-  }
-  return payload.map((field, index) =>
-    validateCustomField(field, `custom_fields[${index}]`),
+  return expectArray(response, "custom_fields", context).map((field, index) =>
+    checkShape<CustomField>(field, CUSTOM_FIELD_SPEC, `custom_fields[${index}]`),
   );
 }
 
 export function validatePetCustomFieldsResponse(
   payload: unknown,
 ): PetCustomFieldsResponse {
-  const response = expectRecord(payload, "pet custom fields response");
+  const context = "pet custom fields response";
   return {
-    custom_fields: validateCustomFieldArray(
-      response.custom_fields,
-      "pet custom fields response",
-    ),
+    custom_fields: validateCustomFields(expectRecord(payload, context), context),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Person validators
+// People
 // ---------------------------------------------------------------------------
 
+const PERSON_SPEC: Spec = {
+  id: "string",
+  type: "string",
+  name: "string",
+  email: "string|null",
+  phone: "string|null",
+  address: "string|null",
+  status: "string",
+  status_change_notes: "string|null",
+  custom_field_data: "object",
+  tags: "string[]",
+  capacity: "number|null",
+  skills: "string[]?",
+  interests: "string[]?",
+  preferred_roles: "string[]?",
+  languages: "string[]?",
+  application: "object?",
+  created_at: "string",
+  updated_at: "string",
+};
+
+const APPLICATION_SPEC: Spec = {
+  id: "string",
+  pet_ids: "string[]",
+  submitted_at: "string",
+};
+
 export function validatePerson(payload: unknown, context = "person"): Person {
-  const person = expectRecord(payload, context);
-
-  expectString(person, "id", context);
-  expectString(person, "type", context);
-  expectString(person, "name", context);
-  expectNullableString(person, "email", context);
-  expectNullableString(person, "phone", context);
-  expectNullableString(person, "address", context);
-  expectString(person, "status", context);
-  expectNullableString(person, "status_change_notes", context);
-  expectJsonRecord(person, "custom_field_data", context);
-  expectStringArray(person, "tags", context);
-  expectNullableNumber(person, "capacity", context);
+  const person = checkShape<Person>(payload, PERSON_SPEC, context);
   if (person.application !== undefined) {
-    const application = expectRecord(
-      person.application,
-      `${context}.application`,
-    );
-    expectString(application, "id", `${context}.application`);
-    expectStringArray(application, "pet_ids", `${context}.application`);
-    expectString(application, "submitted_at", `${context}.application`);
+    checkShape(person.application, APPLICATION_SPEC, `${context}.application`);
   }
-  expectString(person, "created_at", context);
-  expectString(person, "updated_at", context);
-
-  return person as unknown as Person;
+  return person;
 }
 
 export function validatePersonListResponse(
   payload: unknown,
 ): PersonListResponse {
-  const response = expectRecord(payload, "people list response");
-  const people = response.people;
-
-  if (!Array.isArray(people)) {
-    fail("people list response.people must be an array", response);
-  }
-
+  const context = "people list response";
+  const response = checkShape<{ type: PersonType }>(
+    payload,
+    { type: "string" },
+    context,
+  );
   return {
-    type: expectString(response, "type", "people list response") as PersonType,
-    data: people.map((person, index) =>
+    type: response.type,
+    data: expectArray(response, "people", context).map((person, index) =>
       validatePerson(person, `people[${index}]`),
     ),
-    total: expectNumber(response, "total", "people list response"),
-    limit: expectNumber(response, "limit", "people list response"),
-    offset: expectNumber(response, "offset", "people list response"),
-    hasMore: expectBoolean(response, "hasMore", "people list response"),
+    ...checkPage(response, context),
   };
 }
 
 export function validatePersonCustomFieldsResponse(
   payload: unknown,
 ): PersonCustomFieldsResponse {
-  const response = expectRecord(payload, "person custom fields response");
+  const context = "person custom fields response";
+  const response = checkShape<{ type: PersonType }>(
+    payload,
+    { type: "string" },
+    context,
+  );
   return {
-    type: expectString(
-      response,
-      "type",
-      "person custom fields response",
-    ) as PersonType,
-    custom_fields: validateCustomFieldArray(
-      response.custom_fields,
-      "person custom fields response",
-    ),
+    type: response.type,
+    custom_fields: validateCustomFields(response, context),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Adoption fees validators
+// Adoption fees & contracts
 // ---------------------------------------------------------------------------
 
-function validateAdoptionFeeEntry(
-  payload: unknown,
-  context: string,
-): AdoptionFeeEntry {
-  const entry = expectRecord(payload, context);
-
-  expectString(entry, "species", context);
-  expectString(entry, "attribute_type", context);
-  expectString(entry, "attribute_value", context);
-  expectNumber(entry, "adjustment", context);
-
-  return entry as unknown as AdoptionFeeEntry;
-}
+const ADOPTION_FEE_SPEC: Spec = {
+  species: "string",
+  attribute_type: "string",
+  attribute_value: "string",
+  adjustment: "number",
+};
 
 export function validateAdoptionFeesResponse(
   payload: unknown,
 ): AdoptionFeesResponse {
-  const response = expectRecord(payload, "adoption fees response");
-  const fees = response.fees;
-
-  if (!Array.isArray(fees)) {
-    fail("adoption fees response.fees must be an array", response);
-  }
-
+  const context = "adoption fees response";
   return {
-    fees: fees.map((entry, index) =>
-      validateAdoptionFeeEntry(entry, `fees[${index}]`),
+    fees: expectArray(expectRecord(payload, context), "fees", context).map(
+      (entry, index) =>
+        checkShape<AdoptionFeeEntry>(entry, ADOPTION_FEE_SPEC, `fees[${index}]`),
     ),
   };
 }
 
-// ---------------------------------------------------------------------------
-// Contract validators
-// ---------------------------------------------------------------------------
-
 export function validateContractResponse(payload: unknown): ContractResponse {
-  const response = expectRecord(payload, "contract response");
-
-  expectString(response, "type", "contract response");
-  expectString(response, "content", "contract response");
-  expectNullableString(response, "updated_at", "contract response");
-
-  return response as unknown as ContractResponse;
+  return checkShape<ContractResponse>(
+    payload,
+    { type: "string", content: "string", updated_at: "string|null" },
+    "contract response",
+  );
 }

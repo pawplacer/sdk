@@ -1,870 +1,299 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
+import { PawPlacerResponseValidationError } from "../src/errors";
 import {
-  PawPlacerApiError,
-  PawPlacerResponseValidationError,
-} from "../src/errors";
-import { PetsApi } from "../src/resources/pets";
-import type { RequestManager } from "../src/request-manager";
-import type { Pet } from "../src/types";
-import { createMockRequestManager } from "./test-utils";
+  MINIMAL_PET_INPUT,
+  PET_ID,
+  PET_ID_2,
+  UUID_PATTERN,
+  makePet,
+  page,
+  useStubServer,
+} from "./helpers";
 
-const mockPet: Pet = {
-  id: "pet-1",
-  name: "Buddy",
-  species: "dog",
-  age_category: "young",
-  sex: "male",
-  size: "medium",
-  status: "available",
-  health: "good",
-  breed: ["Labrador"],
-  color: ["Black"],
-  age_years: null,
-  age_months: null,
-  age_birthday: null,
-  description: "Friendly dog",
-  spayed: true,
-  adoption_fee: "250",
-  microchip_id: null,
-  good_with: ["families"],
-  bad_with: [],
-  temperaments: ["playful"],
-  image_urls: ["https://example.com/buddy.jpg"],
-  image_url: "https://example.com/buddy.jpg",
-  coat_length: null,
-  custom_field_data: {},
-  custom_id: null,
-  intake_date: null,
-  outcome_date: null,
-  primary_veterinarian: null,
-  show_public: true,
-  special_needs: [],
-  tags: [],
-  status_change_notes: null,
-  weight: null,
-  adopted_on: null,
-  adopted_by: null,
-  created_at: "2026-01-01T00:00:00.000Z",
-  updated_at: "2026-01-01T00:00:00.000Z",
-};
+const stub = useStubServer();
 
-function createPetResponse(overrides: Partial<Pet> = {}): Pet {
-  return {
-    ...mockPet,
-    ...overrides,
-  };
-}
-
-describe("PetsApi", () => {
-  let requests: ReturnType<typeof createMockRequestManager>;
-  let pets: PetsApi;
-
-  beforeEach(() => {
-    requests = createMockRequestManager();
-    pets = new PetsApi(requests as unknown as RequestManager);
-  });
-
-  describe("list", () => {
-    it("calls GET api/pets with cache key", async () => {
-      requests.get.mockResolvedValue({
-        pets: [mockPet],
-        total: 1,
-        limit: 20,
-        offset: 0,
-        hasMore: false,
-      });
-
-      const result = await pets.list();
-
-      expect(requests.get).toHaveBeenCalledWith("api/pets", {
-        searchParams: expect.any(URLSearchParams),
-        memoize: { key: "pets:list:" },
-      });
-      expect(result.data).toHaveLength(1);
-      expect(result.data[0]!.name).toBe("Buddy");
-      expect(result.total).toBe(1);
-      expect(result.hasMore).toBe(false);
+describe("pets.list", () => {
+  it("sends filters as query params and returns a page", async () => {
+    stub.handler = () => ({
+      body: page("pets", [makePet()], { total: 40, hasMore: true }),
     });
 
-    it("uses API hasMore value instead of recomputing", async () => {
-      requests.get.mockResolvedValue({
-        pets: [mockPet],
-        total: 50,
-        limit: 20,
-        offset: 0,
-        hasMore: true,
-      });
-
-      const result = await pets.list({ limit: 20 });
-      expect(result.hasMore).toBe(true);
-    });
-
-    it("passes query params as URLSearchParams", async () => {
-      requests.get.mockResolvedValue({
-        pets: [],
-        total: 0,
-        limit: 10,
-        offset: 5,
-        hasMore: false,
-      });
-
-      await pets.list({
-        limit: 10,
-        offset: 5,
-        species: "dog",
-        status: "available",
-        search: "buddy",
-        updated_since: "2026-01-01T00:00:00.000Z",
-      });
-
-      const [, options] = requests.get.mock.calls[0] as [
-        string,
-        { searchParams: URLSearchParams },
-      ];
-      const params = options.searchParams;
-      expect(params.get("limit")).toBe("10");
-      expect(params.get("offset")).toBe("5");
-      expect(params.get("species")).toBe("dog");
-      expect(params.get("status")).toBe("available");
-      expect(params.get("search")).toBe("buddy");
-      expect(params.get("updated_since")).toBe("2026-01-01T00:00:00.000Z");
-    });
-
-    it("trims empty string params", async () => {
-      requests.get.mockResolvedValue({
-        pets: [],
-        total: 0,
-        limit: 20,
-        offset: 0,
-        hasMore: false,
-      });
-
-      await pets.list({ species: "  ", search: "  " });
-
-      const [, options] = requests.get.mock.calls[0] as [
-        string,
-        { searchParams: URLSearchParams },
-      ];
-      expect(options.searchParams.has("species")).toBe(false);
-      expect(options.searchParams.has("search")).toBe(false);
-    });
-
-    it("throws when API returns error response", async () => {
-      requests.get.mockResolvedValue({
-        error: "Invalid API key",
-        code: "invalid_api_key",
-        request_id: "req-1",
-      });
-
-      await expect(pets.list()).rejects.toThrow("Invalid API key");
-    });
-
-    it("throws when API returns rate limit error", async () => {
-      requests.get.mockResolvedValue({
-        error: "rate limited",
-        code: "rate_limited",
-        request_id: "req-1",
-      });
-
-      await expect(pets.list()).rejects.toThrow("rate limited");
-    });
-
-    it("throws when list response shape is invalid", async () => {
-      requests.get.mockResolvedValue({
-        pets: [{}],
-        total: 1,
-        limit: 20,
-        offset: 0,
-        hasMore: false,
-      });
-
-      await expect(pets.list()).rejects.toThrow(
-        PawPlacerResponseValidationError,
-      );
-    });
-  });
-
-  describe("get / getById", () => {
-    it("calls GET api/pets/:id with cache key", async () => {
-      requests.get.mockResolvedValue(mockPet);
-
-      const result = await pets.get("pet-1");
-
-      expect(requests.get).toHaveBeenCalledWith("api/pets/pet-1", {
-        memoize: {
-          key: "pets:get:pet-1",
-          staleWhileRevalidateMs: 30 * 60 * 1000,
-          forceRefresh: undefined,
-        },
-      });
-      expect(result.name).toBe("Buddy");
-    });
-
-    it("getById delegates to get", async () => {
-      requests.get.mockResolvedValue(mockPet);
-
-      const result = await pets.getById("pet-1");
-      expect(result.name).toBe("Buddy");
-    });
-
-    it("throws when id is empty", async () => {
-      await expect(pets.get("")).rejects.toThrow(
-        "Pet ID is required and must be a string",
-      );
-    });
-
-    it("throws when id is whitespace only", async () => {
-      await expect(pets.get("   ")).rejects.toThrow(
-        "Pet ID is required and must be a non-empty string",
-      );
-    });
-
-    it("trims id before using", async () => {
-      requests.get.mockResolvedValue(mockPet);
-
-      await pets.get("  pet-1  ");
-
-      expect(requests.get).toHaveBeenCalledWith(
-        "api/pets/pet-1",
-        expect.anything(),
-      );
-    });
-
-    it("supports forceRefresh option", async () => {
-      requests.get.mockResolvedValue(mockPet);
-
-      await pets.get("pet-1", { forceRefresh: true });
-
-      expect(requests.get).toHaveBeenCalledWith(
-        "api/pets/pet-1",
-        expect.objectContaining({
-          memoize: expect.objectContaining({ forceRefresh: true }),
-        }),
-      );
-    });
-
-    it("throws on API error response", async () => {
-      requests.get.mockResolvedValue({
-        error: "Pet not found",
-        code: "pet_not_found",
-        request_id: "req-1",
-      });
-
-      await expect(pets.get("nonexistent")).rejects.toThrow("Pet not found");
-    });
-
-    it("throws when pet response shape is invalid", async () => {
-      requests.get.mockResolvedValue({
-        id: "pet-1",
-        name: "Buddy",
-      });
-
-      await expect(pets.get("pet-1")).rejects.toThrow(
-        PawPlacerResponseValidationError,
-      );
-    });
-  });
-
-  describe("create", () => {
-    const validInput = {
-      name: "Max",
-      species: "dog" as const,
-      age_category: "young" as const,
-      sex: "male" as const,
-      size: "medium" as const,
+    const result = await stub.client().pets.list({
       status: "available",
-      health: "good" as const,
+      species: "dog",
+      search: "  max  ",
+      updated_since: "2026-01-01T00:00:00.000Z",
+      limit: 12,
+      offset: 24,
+    });
+
+    const { path, query } = stub.requests[0];
+    expect(path).toBe("/api/pets");
+    expect(Object.fromEntries(query)).toEqual({
+      limit: "12",
+      offset: "24",
+      search: "max",
+      species: "dog",
+      status: "available",
+      updated_since: "2026-01-01T00:00:00.000Z",
+    });
+    expect(result).toMatchObject({ total: 40, hasMore: true, limit: 20 });
+    expect(result.data[0].name).toBe("Max");
+  });
+
+  it("omits blank filters", async () => {
+    stub.handler = () => ({ body: page("pets", []) });
+
+    await stub.client().pets.list({ search: "  ", status: undefined });
+
+    expect([...stub.requests[0].query]).toEqual([]);
+  });
+
+  it("validates every pet in the response", async () => {
+    stub.handler = () => ({
+      body: page("pets", [makePet(), { ...makePet(), breed: "Lab" }]),
+    });
+
+    await expect(stub.client().pets.list()).rejects.toThrow(
+      new PawPlacerResponseValidationError(
+        "pets[1].breed must be string[]",
+        undefined,
+      ).message,
+    );
+  });
+
+  it("accepts empty-string enum fields and optional extras", async () => {
+    stub.handler = () => ({
+      body: page("pets", [
+        makePet({ species: "", size: "", health: "" }),
+        { ...makePet(), hold_until: undefined, is_sample: undefined },
+      ]),
+    });
+
+    const result = await stub.client().pets.list();
+
+    expect(result.data).toHaveLength(2);
+  });
+});
+
+describe("pets.listAll", () => {
+  it("pages until hasMore is false", async () => {
+    stub.handler = (req) => {
+      const offset = Number(req.query.get("offset"));
+      return {
+        body: page("pets", offset === 0 ? [makePet(), makePet({ id: PET_ID_2 })] : [makePet({ id: "p3" })], {
+          offset,
+          limit: 2,
+          total: 3,
+          hasMore: offset === 0,
+        }),
+      };
     };
 
-    it("sends POST to api/pets with normalized payload", async () => {
-      requests.post.mockResolvedValue(
-        createPetResponse({ id: "new-pet", ...validInput }),
-      );
+    const ids: string[] = [];
+    for await (const pet of stub.client().pets.listAll({ status: "available", limit: 2 })) {
+      ids.push(pet.id);
+    }
 
-      const result = await pets.create(validInput);
+    expect(ids).toEqual([PET_ID, PET_ID_2, "p3"]);
+    expect(stub.requests.map((r) => r.query.get("offset"))).toEqual(["0", "2"]);
+    expect(stub.requests[0].query.get("status")).toBe("available");
+  });
+});
 
-      expect(requests.post).toHaveBeenCalledWith("api/pets", {
-        json: expect.objectContaining({
-          name: "Max",
-          species: "dog",
-          status: "available",
-        }),
-        headers: expect.objectContaining({
-          "Idempotency-Key": expect.any(String),
-        }),
-        retry: { methods: ["post"] },
-      });
-      expect(result.name).toBe("Max");
+describe("pets.get", () => {
+  it("fetches by ID", async () => {
+    stub.handler = () => ({ body: makePet() });
+
+    const pet = await stub.client().pets.get(` ${PET_ID} `);
+
+    expect(stub.requests[0].path).toBe(`/api/pets/${PET_ID}`);
+    expect(pet.id).toBe(PET_ID);
+  });
+
+  it("rejects a blank ID without a request", async () => {
+    const client = stub.client();
+    await expect(client.pets.get("")).rejects.toThrow("Pet ID is required");
+    await expect(client.pets.get("   ")).rejects.toThrow("Pet ID is required");
+    expect(stub.requests).toHaveLength(0);
+  });
+});
+
+describe("pets.create", () => {
+  it("posts a trimmed payload with an automatic UUID idempotency key", async () => {
+    stub.handler = () => ({ status: 201, body: makePet() });
+
+    const pet = await stub.client().pets.create({
+      ...MINIMAL_PET_INPUT,
+      name: "  Max  ",
+      breed: [" Lab ", " "],
+      adoption_fee: 250,
+      description: "",
+      spayed: false,
+      custom_field_data: { has_yard: true },
     });
 
-    it("sends caller-provided Idempotency-Key header and enables POST retry", async () => {
-      requests.post.mockResolvedValue(
-        createPetResponse({ id: "new-pet", ...validInput }),
-      );
+    const req = stub.requests[0];
+    expect(req.method).toBe("POST");
+    expect(req.path).toBe("/api/pets");
+    expect(req.headers["idempotency-key"]).toMatch(UUID_PATTERN);
+    expect(req.body).toEqual({
+      ...MINIMAL_PET_INPUT,
+      name: "Max",
+      breed: ["Lab"],
+      adoption_fee: "250",
+      spayed: false,
+      custom_field_data: { has_yard: true },
+    });
+    expect(pet.id).toBe(PET_ID);
+  });
 
-      await pets.create(validInput, { idempotencyKey: "my-key-123" });
+  it("sends a caller-provided idempotency key", async () => {
+    stub.handler = () => ({ status: 201, body: makePet() });
 
-      expect(requests.post).toHaveBeenCalledWith("api/pets", {
-        json: expect.any(Object),
-        headers: { "Idempotency-Key": "my-key-123" },
-        retry: { methods: ["post"] },
-      });
+    await stub
+      .client()
+      .pets.create(MINIMAL_PET_INPUT, { idempotencyKey: "sync:ext-1" });
+
+    expect(stub.requests[0].headers["idempotency-key"]).toBe("sync:ext-1");
+  });
+
+  it("does not require health", async () => {
+    stub.handler = () => ({ status: 201, body: makePet() });
+
+    await stub.client().pets.create(MINIMAL_PET_INPUT);
+
+    expect(stub.requests[0].body).not.toHaveProperty("health");
+  });
+
+  it.each([
+    ["name", "Pet name is required"],
+    ["species", "Pet species is required: e.g. dog, cat, or rabbit"],
+    ["age_category", "Pet age_category is required"],
+    ["sex", "Pet sex is required"],
+    ["size", "Pet size is required"],
+    ["status", "Pet status is required"],
+  ])("requires %s", async (field, message) => {
+    const input = { ...MINIMAL_PET_INPUT, [field]: " " };
+    await expect(stub.client().pets.create(input as never)).rejects.toThrow(message);
+    expect(stub.requests).toHaveLength(0);
+  });
+
+  it.each([
+    [{ breed: "Lab" }, "Pet breed must be an array of strings"],
+    [{ breed: ["Lab", 1] }, "Pet breed must be an array of strings"],
+    [{ description: 5 }, "Pet description must be a string"],
+    [{ adoption_fee: Number.NaN }, "Pet adoption_fee must be a finite number or string"],
+    [{ custom_field_data: [] }, "Pet custom_field_data must be an object"],
+    [{ spayed: "yes" }, "Pet spayed must be a boolean"],
+  ])("rejects malformed field %o", async (fields, message) => {
+    await expect(
+      stub.client().pets.create({ ...MINIMAL_PET_INPUT, ...fields } as never),
+    ).rejects.toThrow(message);
+  });
+
+  it("rejects a non-object payload", async () => {
+    await expect(stub.client().pets.create(null as never)).rejects.toThrow(
+      "Pet create payload must be an object",
+    );
+  });
+});
+
+describe("pets.update", () => {
+  it("patches only the given fields, URL-encoding the identifier", async () => {
+    stub.handler = () => ({ body: makePet() });
+
+    await stub.client().pets.update("DOG 2026/001", { description: " New bio " });
+
+    const req = stub.requests[0];
+    expect(req.method).toBe("PATCH");
+    expect(req.path).toBe("/api/pets/DOG%202026%2F001");
+    expect(req.body).toEqual({ description: "New bio" });
+    expect(req.headers["idempotency-key"]).toMatch(UUID_PATTERN);
+  });
+
+  it("sends empty arrays and empty strings so fields can be cleared", async () => {
+    stub.handler = () => ({ body: makePet() });
+
+    await stub.client().pets.update(PET_ID, {
+      image_urls: [],
+      special_needs: [],
+      description: "",
+      intake_date: "  ",
+      adoption_fee: "",
     });
 
-    it("allows disabling automatic idempotency headers and POST retry", async () => {
-      requests.post.mockResolvedValue(
-        createPetResponse({ id: "new-pet", ...validInput }),
-      );
-
-      await pets.create(validInput, { idempotencyKey: false });
-
-      expect(requests.post).toHaveBeenCalledWith("api/pets", {
-        json: expect.any(Object),
-        headers: {},
-      });
-    });
-
-    it("invalidates list cache after successful create", async () => {
-      requests.post.mockResolvedValue(
-        createPetResponse({ id: "new-pet", ...validInput }),
-      );
-
-      await pets.create(validInput);
-
-      expect(requests.invalidateMatching).toHaveBeenCalledWith("pets:list:");
-    });
-
-    it("throws when name is missing", async () => {
-      await expect(pets.create({ ...validInput, name: "" })).rejects.toThrow(
-        "Pet name is required",
-      );
-    });
-
-    it("throws when species is missing", async () => {
-      await expect(
-        pets.create({ ...validInput, species: "" as never }),
-      ).rejects.toThrow("Pet species is required");
-    });
-
-    it("throws when payload is null", async () => {
-      await expect(pets.create(null as never)).rejects.toThrow(
-        "Create payload is required",
-      );
-    });
-
-    it("normalizes breeds alias to breed", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        breeds: ["Labrador", "Poodle"],
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.breed).toEqual(["Labrador", "Poodle"]);
-      expect(options.json).not.toHaveProperty("breeds");
-    });
-
-    it("normalizes colors alias to color", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        colors: ["Black", "White"],
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.color).toEqual(["Black", "White"]);
-    });
-
-    it("converts numeric adoption_fee to string", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        adoption_fee: 250,
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.adoption_fee).toBe("250");
-    });
-
-    it("trims string adoption_fee values", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        adoption_fee: "  250  ",
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.adoption_fee).toBe("250");
-    });
-
-    it("throws a clear error for invalid adoption_fee values", async () => {
-      await expect(
-        pets.create({
-          ...validInput,
-          adoption_fee: Number.NaN,
-        }),
-      ).rejects.toThrow("Pet adoption_fee must be a finite number or string");
-
-      await expect(
-        pets.create({
-          ...validInput,
-          adoption_fee: { amount: 250 } as never,
-        }),
-      ).rejects.toThrow("Pet adoption_fee must be a finite number or string");
-    });
-
-    it("normalizes is_published alias to show_public", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        is_published: true,
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.show_public).toBe(true);
-    });
-
-    it("trims string fields in payload", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        name: "  Max  ",
-        description: "  A good dog  ",
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.name).toBe("Max");
-      expect(options.json.description).toBe("A good dog");
-    });
-
-    it("omits empty string optional fields", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        description: "",
-        microchip_id: "  ",
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json).not.toHaveProperty("description");
-      expect(options.json).not.toHaveProperty("microchip_id");
-    });
-
-    it("throws a clear error for invalid string arrays", async () => {
-      await expect(
-        pets.create({
-          ...validInput,
-          breed: ["Labrador", 42] as never,
-        }),
-      ).rejects.toThrow("Pet breed must be an array of strings");
-    });
-
-    it("throws a clear error for invalid custom_field_data", async () => {
-      await expect(
-        pets.create({
-          ...validInput,
-          custom_field_data: ["not", "an", "object"] as never,
-        }),
-      ).rejects.toThrow("Pet custom_field_data must be an object");
-    });
-
-    it("throws on API validation error", async () => {
-      requests.post.mockResolvedValue({
-        errors: [{ field: "status", message: "Invalid status" }],
-      });
-
-      await expect(pets.create(validInput)).rejects.toThrow(
-        "Validation failed",
-      );
-    });
-
-    it("throws PawPlacerApiError with code and requestId", async () => {
-      requests.post.mockResolvedValue({
-        error: "Invalid API key",
-        code: "invalid_api_key",
-        request_id: "req-1",
-      });
-
-      try {
-        await pets.create(validInput);
-        expect.fail("Expected error");
-      } catch (err) {
-        expect(err).toBeInstanceOf(PawPlacerApiError);
-        const apiErr = err as PawPlacerApiError;
-        expect(apiErr.code).toBe("invalid_api_key");
-        expect(apiErr.requestId).toBe("req-1");
-        expect(apiErr.message).toBe("Invalid API key");
-        expect(apiErr.apiError).toMatchObject({
-          message: "Invalid API key",
-          error: "Invalid API key",
-        });
-      }
-    });
-
-    it("passes custom_status_id through to payload", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        custom_status_id: "cust-status-123",
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.custom_status_id).toBe("cust-status-123");
-    });
-
-    it("passes legacy intake metadata fields through to payload", async () => {
-      requests.post.mockResolvedValue(createPetResponse({ id: "new-pet" }));
-
-      await pets.create({
-        ...validInput,
-        location_found: "  Austin, TX  ",
-        reason_for_surrender: "  Owner relocation  ",
-      });
-
-      const [, options] = requests.post.mock.calls[0] as [
-        string,
-        { json: Record<string, unknown> },
-      ];
-      expect(options.json.location_found).toBe("Austin, TX");
-      expect(options.json.reason_for_surrender).toBe("Owner relocation");
+    expect(stub.requests[0].body).toEqual({
+      image_urls: [],
+      special_needs: [],
+      description: "",
+      intake_date: "",
+      adoption_fee: "",
     });
   });
 
-  describe("update", () => {
-    it("sends PATCH to api/pets/:id with normalized payload", async () => {
-      requests.patch.mockResolvedValue(
-        createPetResponse({
-          description: "Updated bio",
-          image_urls: ["https://example.com/dog.jpg"],
-          status: "available",
-        }),
-      );
-
-      const result = await pets.update(
-        " pet-1 ",
-        {
-          description: " Updated bio ",
-          image_urls: ["https://example.com/dog.jpg"],
-          show_public: true,
-          status: "available",
-        },
-        { idempotencyKey: "pet-update-1" },
-      );
-
-      expect(requests.patch).toHaveBeenCalledWith("api/pets/pet-1", {
-        json: {
-          description: "Updated bio",
-          image_urls: ["https://example.com/dog.jpg"],
-          show_public: true,
-          status: "available",
-        },
-        headers: { "Idempotency-Key": "pet-update-1" },
-        retry: { methods: ["patch"] },
-      });
-      expect(result.description).toBe("Updated bio");
-    });
-
-    it("allows disabling automatic idempotency headers and PATCH retry", async () => {
-      requests.patch.mockResolvedValue(createPetResponse());
-
-      await pets.update(
-        "pet-1",
-        { description: "Updated" },
-        { idempotencyKey: false },
-      );
-
-      expect(requests.patch).toHaveBeenCalledWith("api/pets/pet-1", {
-        json: { description: "Updated" },
-        headers: {},
-      });
-    });
-
-    it("invalidates list and detail caches after successful update", async () => {
-      requests.patch.mockResolvedValue(createPetResponse());
-
-      await pets.update("pet-1", { status: "pending" });
-
-      expect(requests.invalidateMatching).toHaveBeenCalledWith("pets:list:");
-      expect(requests.invalidate).toHaveBeenCalledWith("pets:get:pet-1");
-    });
-
-    it("updates by custom_id and invalidates the returned canonical pet detail cache", async () => {
-      requests.patch.mockResolvedValue(
-        createPetResponse({ id: "pet-uuid-1", custom_id: "DOG-2026-001" }),
-      );
-
-      const result = await pets.update("DOG-2026-001", {
-        description: "Updated by custom id",
-      });
-
-      expect(requests.patch).toHaveBeenCalledWith(
-        "api/pets/DOG-2026-001",
-        expect.objectContaining({
-          json: { description: "Updated by custom id" },
-        }),
-      );
-      expect(requests.invalidateMatching).toHaveBeenCalledWith("pets:list:");
-      expect(requests.invalidate).toHaveBeenCalledWith("pets:get:pet-uuid-1");
-      expect(requests.invalidate).toHaveBeenCalledWith("pets:get:DOG-2026-001");
-      expect(result.id).toBe("pet-uuid-1");
-    });
-
-    it("throws when update payload is null", async () => {
-      await expect(pets.update("pet-1", null as never)).rejects.toThrow(
-        "Update payload is required",
-      );
-    });
-
-    it("throws when update payload normalizes to empty", async () => {
-      await expect(pets.update("pet-1", { description: "  " })).rejects.toThrow(
-        "Update payload must include at least one field",
-      );
-    });
-
-    it("throws when id is empty", async () => {
-      await expect(pets.update("", { description: "Updated" })).rejects.toThrow(
-        "Pet ID is required and must be a string",
-      );
-    });
-
-    it("throws on API validation error", async () => {
-      requests.patch.mockResolvedValue({
-        error: "Pet not found",
-        code: "pet_not_found",
-        request_id: "req-1",
-      });
-
-      await expect(
-        pets.update("missing", { description: "Updated" }),
-      ).rejects.toThrow("Pet not found");
-    });
+  it("rejects an empty update", async () => {
+    await expect(stub.client().pets.update(PET_ID, {})).rejects.toThrow(
+      "Pet update payload must include at least one field",
+    );
+    await expect(
+      stub.client().pets.update(PET_ID, { description: undefined }),
+    ).rejects.toThrow("at least one field");
+    expect(stub.requests).toHaveLength(0);
   });
 
-  describe("findMany", () => {
-    it("delegates to list and returns data array", async () => {
-      requests.get.mockResolvedValue({
-        pets: [mockPet],
-        total: 1,
-        limit: 10,
-        offset: 0,
-        hasMore: false,
-      });
+  it("drops the cached detail for the returned pet", async () => {
+    let description = "old";
+    stub.handler = (req) => {
+      if (req.method === "PATCH") description = "new";
+      return {
+        body: makePet({ description }),
+        headers: { "cache-control": req.method === "GET" ? "max-age=60" : "no-store" },
+      };
+    };
+    const client = stub.client();
 
-      const result = await pets.findMany({ species: "dog" });
+    await client.pets.get(PET_ID);
+    await client.pets.update("custom-1", { description: "new" });
+    const pet = await client.pets.get(PET_ID);
 
-      expect(result).toHaveLength(1);
-      expect(result[0]!.name).toBe("Buddy");
-    });
-
-    it("applies default limit of 10", async () => {
-      requests.get.mockResolvedValue({
-        pets: [],
-        total: 0,
-        limit: 10,
-        offset: 0,
-        hasMore: false,
-      });
-
-      await pets.findMany();
-
-      const [, options] = requests.get.mock.calls[0] as [
-        string,
-        { searchParams: URLSearchParams },
-      ];
-      expect(options.searchParams.get("limit")).toBe("10");
-    });
-
-    it("respects custom limit override", async () => {
-      requests.get.mockResolvedValue({
-        pets: [],
-        total: 0,
-        limit: 50,
-        offset: 0,
-        hasMore: false,
-      });
-
-      await pets.findMany(undefined, 50);
-
-      const [, options] = requests.get.mock.calls[0] as [
-        string,
-        { searchParams: URLSearchParams },
-      ];
-      expect(options.searchParams.get("limit")).toBe("50");
-    });
+    expect(pet.description).toBe("new");
+    expect(stub.requests.map((r) => r.method)).toEqual(["GET", "PATCH", "GET"]);
   });
+});
 
-  describe("search", () => {
-    it("delegates to list with search param", async () => {
-      requests.get.mockResolvedValue({
-        pets: [mockPet],
-        total: 1,
-        limit: 20,
-        offset: 0,
-        hasMore: false,
-      });
-
-      const result = await pets.search("buddy");
-      expect(result).toHaveLength(1);
-    });
-
-    it("throws when query is empty", async () => {
-      await expect(pets.search("")).rejects.toThrow("Search query is required");
-    });
-
-    it("throws when query is whitespace", async () => {
-      await expect(pets.search("   ")).rejects.toThrow(
-        "Search query is required",
-      );
-    });
-  });
-
-  describe("getByStatus", () => {
-    it("delegates to list with status param", async () => {
-      requests.get.mockResolvedValue({
-        pets: [mockPet],
-        total: 1,
-        limit: 20,
-        offset: 0,
-        hasMore: false,
-      });
-
-      const result = await pets.getByStatus("available");
-      expect(result).toHaveLength(1);
-    });
-
-    it("throws when status is empty", async () => {
-      await expect(pets.getByStatus("")).rejects.toThrow("Status is required");
-    });
-  });
-
-  describe("getCustomFields", () => {
-    it("calls GET api/pets/custom-fields with 15min cache", async () => {
-      requests.get.mockResolvedValue({
+describe("pets.getCustomFields", () => {
+  it("returns the field definitions", async () => {
+    stub.handler = () => ({
+      body: {
         custom_fields: [
           {
-            field_key: "fav_toy",
-            label: "Favorite Toy",
-            field_type: "text",
+            field_key: "has_yard",
+            label: "Has yard",
+            field_type: "boolean",
             required: false,
-            hidden: true,
-            internal_only: false,
+            help_text: null,
+            section_order: 1,
+            hidden: false,
           },
         ],
-      });
-
-      const result = await pets.getCustomFields();
-
-      expect(requests.get).toHaveBeenCalledWith("api/pets/custom-fields", {
-        memoize: {
-          key: "pets:custom-fields",
-          refreshFrequencyMinutes: 15,
-        },
-      });
-      expect(result).toHaveLength(1);
-      expect(result[0]!.field_key).toBe("fav_toy");
-      expect(result[0]!.hidden).toBe(true);
-      expect(result[0]!.internal_only).toBe(false);
+      },
     });
 
-    it("throws when custom field visibility flags have invalid types", async () => {
-      requests.get.mockResolvedValue({
-        custom_fields: [
-          {
-            field_key: "fav_toy",
-            label: "Favorite Toy",
-            field_type: "text",
-            required: false,
-            hidden: "yes",
-          },
-        ],
-      });
+    const fields = await stub.client().pets.getCustomFields();
 
-      await expect(pets.getCustomFields()).rejects.toThrow(
-        PawPlacerResponseValidationError,
-      );
-    });
-
-    it("returns empty array when custom_fields is null", async () => {
-      requests.get.mockResolvedValue({ custom_fields: null });
-
-      await expect(pets.getCustomFields()).rejects.toThrow(
-        PawPlacerResponseValidationError,
-      );
-    });
-
-    it("throws on API error response", async () => {
-      requests.get.mockResolvedValue({
-        error: "Invalid API key",
-        code: "invalid_api_key",
-        request_id: "req-1",
-      });
-
-      await expect(pets.getCustomFields()).rejects.toThrow("Invalid API key");
-    });
-
-    it("throws when custom field response shape is invalid", async () => {
-      requests.get.mockResolvedValue({
-        custom_fields: [
-          {
-            field_key: "fav_toy",
-          },
-        ],
-      });
-
-      await expect(pets.getCustomFields()).rejects.toThrow(
-        PawPlacerResponseValidationError,
-      );
-    });
+    expect(stub.requests[0].path).toBe("/api/pets/custom-fields");
+    expect(fields.map((f) => f.field_key)).toEqual(["has_yard"]);
   });
 
-  describe("typed response fields", () => {
-    it("returns pet with typed enum fields from get", async () => {
-      requests.get.mockResolvedValue(mockPet);
-
-      const result = await pets.get("pet-1");
-
-      // These assertions verify the typed fields match expected enum values
-      expect(result.species).toBe("dog");
-      expect(result.status).toBe("available");
-      expect(result.sex).toBe("male");
-      expect(result.size).toBe("medium");
-      expect(result.health).toBe("good");
-      expect(result.age_category).toBe("young");
-      expect(result.good_with).toEqual(["families"]);
-      expect(result.temperaments).toEqual(["playful"]);
+  it("rejects a malformed field definition", async () => {
+    stub.handler = () => ({
+      body: { custom_fields: [{ field_key: "x", label: "X", field_type: "text" }] },
     });
+
+    await expect(stub.client().pets.getCustomFields()).rejects.toThrow(
+      "custom_fields[0].required must be boolean",
+    );
   });
 });

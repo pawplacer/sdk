@@ -1,319 +1,214 @@
-const DEFAULT_REFRESH_FREQUENCY_MS = 180 * 60 * 1000; // 3 hours
-const STALE_BUFFER_MULTIPLIER = 3;
-const DEFAULT_MAX_SIZE = 1000;
-
-function normalizeNonNegativeNumber(
-  value: number | undefined,
-  fallback: number,
-): number {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.max(value, 0)
-    : fallback;
-}
-
-function normalizeMaxSize(value: number | undefined): number {
-  return Math.floor(normalizeNonNegativeNumber(value, DEFAULT_MAX_SIZE));
-}
-
-export interface CacheSettings {
-  refreshFrequencyMs: number;
+/** How long a response stays fresh, then how much longer it may be served stale. */
+export interface Freshness {
+  /** Serve from cache without a request for this long. */
+  maxAgeMs: number;
+  /** After `maxAgeMs`, serve the cached value for this much longer while revalidating in the background. */
   staleWhileRevalidateMs: number;
-  maxSize: number;
 }
 
-export interface CachePolicy {
-  refreshFrequencyMs?: number;
-  staleWhileRevalidateMs?: number;
-  forceRefresh?: boolean;
-}
+/** Result of a fetch performed on behalf of the cache. */
+export type FetchResult<T> =
+  | { notModified: false; value: T; etag?: string; freshness?: Partial<Freshness> }
+  | { notModified: true; freshness?: Partial<Freshness> };
 
-export interface CacheResolveResult<T> {
-  __cachePolicyResult: true;
-  value: T;
-  policy?: CachePolicy;
-}
-
-export interface CacheMetrics {
+export interface CacheSnapshot {
   hits: number;
   misses: number;
+  /** Background revalidations started for stale entries. */
   refreshes: number;
-}
-
-interface CacheEntry<T> {
-  value: T;
-  expiresAt: number;
-  staleAt: number;
-  pending?: Promise<T>;
-}
-
-interface FallbackValue<T> {
-  hasValue: boolean;
-  value: T;
-}
-
-export interface CacheSnapshot extends CacheMetrics {
   size: number;
   maxSize: number;
 }
 
+interface CacheEntry<T> {
+  hasValue: boolean;
+  value: T | undefined;
+  etag?: string;
+  freshUntil: number;
+  staleUntil: number;
+  pending?: Promise<T>;
+}
+
+export interface CacheOptions {
+  maxSize?: number;
+  /** Used when the API response has no Cache-Control header. */
+  defaultFreshness?: Freshness;
+  /** When set, replaces the API's `max-age` for every entry. */
+  maxAgeOverrideMs?: number;
+}
+
+// Mirrors the API's current `Cache-Control: max-age=60, stale-while-revalidate=300`.
+const DEFAULT_FRESHNESS: Freshness = {
+  maxAgeMs: 60_000,
+  staleWhileRevalidateMs: 300_000,
+};
+const DEFAULT_MAX_SIZE = 1000;
+
+function nonNegative(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(value, 0)
+    : undefined;
+}
+
+/**
+ * In-memory, per-process response cache with stale-while-revalidate,
+ * ETag revalidation, stale-if-error, and request de-duplication.
+ */
 export class CacheManager {
   private store = new Map<string, CacheEntry<unknown>>();
-  private settings: CacheSettings;
-  private metrics: CacheMetrics = { hits: 0, misses: 0, refreshes: 0 };
+  private readonly maxSize: number;
+  private readonly defaultFreshness: Freshness;
+  private readonly maxAgeOverrideMs?: number;
+  private metrics = { hits: 0, misses: 0, refreshes: 0 };
 
-  constructor(settings?: Partial<CacheSettings>) {
-    const refreshFrequencyMs = normalizeNonNegativeNumber(
-      settings?.refreshFrequencyMs,
-      DEFAULT_REFRESH_FREQUENCY_MS,
-    );
-    const staleWhileRevalidateMs = normalizeNonNegativeNumber(
-      settings?.staleWhileRevalidateMs,
-      refreshFrequencyMs * STALE_BUFFER_MULTIPLIER,
-    );
-    this.settings = {
-      refreshFrequencyMs,
-      staleWhileRevalidateMs,
-      maxSize: normalizeMaxSize(settings?.maxSize),
-    };
+  constructor(options: CacheOptions = {}) {
+    this.maxSize = Math.floor(nonNegative(options.maxSize) ?? DEFAULT_MAX_SIZE);
+    this.defaultFreshness = options.defaultFreshness ?? DEFAULT_FRESHNESS;
+    this.maxAgeOverrideMs = nonNegative(options.maxAgeOverrideMs);
   }
 
   async resolve<T>(
     key: string,
-    fetcher: () => Promise<T | CacheResolveResult<T>>,
-    policy?: CachePolicy,
+    fetcher: (etag: string | undefined) => Promise<FetchResult<T>>,
+    options: { forceRefresh?: boolean } = {},
   ): Promise<T> {
     const entry = this.store.get(key) as CacheEntry<T> | undefined;
     const now = Date.now();
-    const refreshFrequencyMs = this.resolveRefreshFrequency(policy);
-    const staleWhileRevalidateMs = this.resolveStaleWhileRevalidate(
-      policy,
-      refreshFrequencyMs,
-    );
 
-    if (entry && !policy?.forceRefresh) {
+    if (entry && !options.forceRefresh) {
+      if (entry.hasValue && now < entry.freshUntil) {
+        this.metrics.hits += 1;
+        this.touch(key, entry);
+        return entry.value as T;
+      }
+      if (entry.hasValue && now < entry.staleUntil) {
+        this.metrics.hits += 1;
+        if (!entry.pending) {
+          this.metrics.refreshes += 1;
+          // Background refresh: failures keep serving the stale value.
+          this.refresh(key, entry, fetcher).catch(() => {});
+        }
+        return entry.value as T;
+      }
       if (entry.pending) {
         this.metrics.hits += 1;
         return entry.pending;
       }
-      if (now < entry.expiresAt) {
-        this.metrics.hits += 1;
-        return entry.value;
-      }
-      if (now < entry.staleAt) {
-        this.metrics.hits += 1;
-        entry.pending = this.runFetch(
-          key,
-          fetcher,
-          refreshFrequencyMs,
-          staleWhileRevalidateMs,
-          {
-            hasValue: true,
-            value: entry.value,
-          },
-        );
-        return entry.value;
-      }
     }
 
     this.metrics.misses += 1;
-    const fallback = entry
-      ? {
-          hasValue: true,
-          value: entry.value,
-        }
-      : undefined;
-    return this.runFetch(
-      key,
-      fetcher,
-      refreshFrequencyMs,
-      staleWhileRevalidateMs,
-      fallback,
-    );
-  }
-
-  set<T>(key: string, value: T, policy?: CachePolicy): void {
-    const refreshFrequencyMs = this.resolveRefreshFrequency(policy);
-    const staleWhileRevalidateMs = this.resolveStaleWhileRevalidate(
-      policy,
-      refreshFrequencyMs,
-    );
-    if (refreshFrequencyMs <= 0 && staleWhileRevalidateMs <= 0) {
-      this.store.delete(key);
-      return;
+    const target = entry ?? this.createPlaceholder<T>(key);
+    if (target.pending && options.forceRefresh !== true) {
+      return target.pending;
     }
-    if (this.settings.maxSize <= 0) {
-      this.store.delete(key);
-      return;
-    }
-    this.store.delete(key);
-    const now = Date.now();
-    this.store.set(key, {
-      value,
-      expiresAt: now + refreshFrequencyMs,
-      staleAt: now + staleWhileRevalidateMs,
+    return this.refresh(key, target, fetcher, {
+      serveStaleOnError: !options.forceRefresh,
     });
-    this.evictIfNeeded();
-  }
-
-  get<T>(key: string): T | null {
-    const entry = this.store.get(key) as CacheEntry<T> | undefined;
-    if (!entry) {
-      return null;
-    }
-    const now = Date.now();
-    if (entry.pending) {
-      return null;
-    }
-    if (now > entry.staleAt) {
-      this.store.delete(key);
-      return null;
-    }
-    return entry.value;
-  }
-
-  peek<T>(key: string): T | null {
-    const entry = this.store.get(key) as CacheEntry<T> | undefined;
-    return entry ? entry.value : null;
   }
 
   delete(key: string): void {
     this.store.delete(key);
   }
 
+  /** Removes keys containing `pattern` (string) or matching it (RegExp). */
+  deleteMatching(pattern: string | RegExp): void {
+    for (const key of this.store.keys()) {
+      if (typeof pattern === "string" ? key.includes(pattern) : pattern.test(key)) {
+        this.store.delete(key);
+      }
+    }
+  }
+
   clear(): void {
     this.store.clear();
   }
 
-  clearPattern(pattern: string | RegExp): void {
-    for (const key of this.store.keys()) {
-      if (
-        pattern instanceof RegExp ? pattern.test(key) : key.includes(pattern)
-      ) {
-        this.store.delete(key);
-      }
-    }
-  }
-
-  size(): number {
-    return this.store.size;
-  }
-
   stats(): CacheSnapshot {
-    return {
-      ...this.metrics,
-      size: this.store.size,
-      maxSize: this.settings.maxSize,
-    };
+    return { ...this.metrics, size: this.store.size, maxSize: this.maxSize };
   }
 
-  private runFetch<T>(
+  private createPlaceholder<T>(key: string): CacheEntry<T> {
+    const entry: CacheEntry<T> = {
+      hasValue: false,
+      value: undefined,
+      freshUntil: 0,
+      staleUntil: 0,
+    };
+    this.store.set(key, entry);
+    return entry;
+  }
+
+  private refresh<T>(
     key: string,
-    fetcher: () => Promise<T | CacheResolveResult<T>>,
-    refreshFrequencyMs: number,
-    staleWhileRevalidateMs: number,
-    fallback?: FallbackValue<T>,
+    entry: CacheEntry<T>,
+    fetcher: (etag: string | undefined) => Promise<FetchResult<T>>,
+    { serveStaleOnError = true }: { serveStaleOnError?: boolean } = {},
   ): Promise<T> {
-    if (fallback?.hasValue) {
-      this.metrics.refreshes += 1;
-    }
-    const pending = fetcher()
+    const pending = fetcher(entry.hasValue ? entry.etag : undefined)
       .then((result) => {
-        const normalized = this.normalizeFetcherResult(result);
-        this.set(key, normalized.value, {
-          refreshFrequencyMs:
-            normalized.policy?.refreshFrequencyMs ?? refreshFrequencyMs,
-          staleWhileRevalidateMs:
-            normalized.policy?.staleWhileRevalidateMs ?? staleWhileRevalidateMs,
-        });
-        return normalized.value;
-      })
-      .catch((error) => {
-        if (fallback?.hasValue) {
-          this.set(key, fallback.value, {
-            refreshFrequencyMs: 0,
-            staleWhileRevalidateMs,
-          });
-          return fallback.value;
+        // Skip writes for entries invalidated while the request was in flight.
+        const current = this.store.get(key) === entry;
+        if (result.notModified) {
+          if (!entry.hasValue) {
+            throw new Error(`Received 304 Not Modified without a cached value for ${key}`);
+          }
+        } else {
+          entry.value = result.value;
+          entry.hasValue = true;
+          entry.etag = result.etag;
         }
-        this.store.delete(key);
+        const { maxAgeMs, staleWhileRevalidateMs } = this.freshness(result.freshness);
+        const now = Date.now();
+        entry.freshUntil = now + maxAgeMs;
+        entry.staleUntil = now + maxAgeMs + staleWhileRevalidateMs;
+        if (current) {
+          if (maxAgeMs + staleWhileRevalidateMs <= 0 || this.maxSize === 0) {
+            this.store.delete(key);
+          } else {
+            this.touch(key, entry);
+            this.evictIfNeeded();
+          }
+        }
+        return entry.value as T;
+      })
+      .catch((error: unknown) => {
+        if (serveStaleOnError && entry.hasValue) {
+          return entry.value as T;
+        }
+        if (!entry.hasValue && this.store.get(key) === entry) {
+          this.store.delete(key);
+        }
         throw error;
       })
       .finally(() => {
-        const entry = this.store.get(key);
-        if (entry) {
-          entry.pending = undefined;
-        }
+        if (entry.pending === pending) entry.pending = undefined;
       });
-    if (!this.store.has(key)) {
-      const now = Date.now();
-      this.store.set(key, {
-        value: fallback?.value as T,
-        expiresAt: now,
-        staleAt: now + staleWhileRevalidateMs,
-        pending,
-      });
-    } else {
-      const entry = this.store.get(key) as CacheEntry<T>;
-      entry.pending = pending;
-    }
+    entry.pending = pending;
     return pending;
   }
 
-  private resolveRefreshFrequency(policy?: CachePolicy): number {
-    const value = policy?.refreshFrequencyMs;
-    if (value === undefined) {
-      return this.settings.refreshFrequencyMs;
-    }
-    return normalizeNonNegativeNumber(value, this.settings.refreshFrequencyMs);
-  }
-
-  private resolveStaleWhileRevalidate(
-    policy: CachePolicy | undefined,
-    refreshFrequencyMs: number,
-  ): number {
-    const value = policy?.staleWhileRevalidateMs;
-    if (value !== undefined) {
-      return normalizeNonNegativeNumber(value, refreshFrequencyMs);
-    }
-    if (policy?.refreshFrequencyMs !== undefined) {
-      return refreshFrequencyMs * STALE_BUFFER_MULTIPLIER;
-    }
-    return this.settings.staleWhileRevalidateMs;
-  }
-
-  private normalizeFetcherResult<T>(
-    result: T | CacheResolveResult<T>,
-  ): CacheResolveResult<T> {
-    if (
-      result !== null &&
-      typeof result === "object" &&
-      "__cachePolicyResult" in result
-    ) {
-      return result as CacheResolveResult<T>;
-    }
-
+  private freshness(fromResponse?: Partial<Freshness>): Freshness {
     return {
-      __cachePolicyResult: true,
-      value: result as T,
+      maxAgeMs:
+        this.maxAgeOverrideMs ??
+        nonNegative(fromResponse?.maxAgeMs) ??
+        this.defaultFreshness.maxAgeMs,
+      staleWhileRevalidateMs:
+        nonNegative(fromResponse?.staleWhileRevalidateMs) ??
+        this.defaultFreshness.staleWhileRevalidateMs,
     };
   }
 
+  /** Moves a key to the end of the Map so eviction drops least-recently-used entries first. */
+  private touch(key: string, entry: CacheEntry<unknown>): void {
+    this.store.delete(key);
+    this.store.set(key, entry);
+  }
+
   private evictIfNeeded(): void {
-    if (this.store.size <= this.settings.maxSize) {
-      return;
-    }
-    const keys = this.store.keys();
-    while (this.store.size > this.settings.maxSize) {
-      const key = keys.next().value as string | undefined;
-      if (!key) {
-        break;
-      }
-      const entry = this.store.get(key);
-      if (entry?.pending) {
-        this.store.set(key, entry);
-        continue;
-      }
-      this.store.delete(key);
+    for (const [key, entry] of this.store) {
+      if (this.store.size <= this.maxSize) return;
+      if (!entry.pending) this.store.delete(key);
     }
   }
 }
