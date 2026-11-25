@@ -12,7 +12,7 @@ Thanks for helping improve the PawPlacer SDK. Public participation is limited to
 
 Requirements:
 
-- Node.js 18 or newer
+- Node.js 22.12 or newer
 - npm
 
 Install dependencies:

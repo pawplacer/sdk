@@ -1,13 +1,11 @@
-import { PawPlacerClient } from "pawplacer-sdk";
+import { PawPlacerClient, type PetSpecies } from "pawplacer-sdk";
 
-// Copy this shape into your Node API route, serverless function, or BFF layer.
-// The SDK and PAWPLACER_API_KEY stay on the server.
-const pawplacer = new PawPlacerClient({
-  cache: { enabled: true, refreshFrequencyMinutes: 60 },
-});
+// Server half of a React/Vite app: put this in your API route, serverless
+// function, or backend. The SDK and PAWPLACER_API_KEY stay on the server.
+const pawplacer = new PawPlacerClient();
 
 export async function getAvailablePetsForReact(filters: {
-  species?: string;
+  species?: PetSpecies;
   search?: string;
 }) {
   const result = await pawplacer.pets.list({
@@ -25,6 +23,7 @@ export async function getAvailablePetsForReact(filters: {
       breed: pet.breed,
       ageCategory: pet.age_category,
       imageUrl: pet.image_url,
+      // global_adoption_fee is set when the account's fee rules apply.
       adoptionFee: pet.global_adoption_fee ?? pet.adoption_fee,
     })),
     total: result.total,

@@ -1,5 +1,5 @@
-// Copy this into React browser code. It talks to your own API route, not to
-// PawPlacer directly.
+// Browser half of a React/Vite app. It calls your own API route
+// (react-vite-server-reference.ts), never PawPlacer directly.
 export interface AvailablePetCard {
   id: string;
   name: string;

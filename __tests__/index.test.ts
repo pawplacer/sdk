@@ -1,41 +1,25 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import * as sdk from "../src";
 
-describe("public entrypoint", () => {
-  it("exports documented runtime APIs", () => {
-    const runtimeExports = [
-      "AdoptionFeesApi",
-      "CacheManager",
-      "ContractsApi",
+describe("package entrypoint", () => {
+  it("exports only the client, error classes, and constants at runtime", () => {
+    expect(Object.keys(sdk).sort()).toEqual([
+      "CONTRACT_TYPES",
+      "PERSON_TYPES",
       "PawPlacerApiError",
       "PawPlacerClient",
       "PawPlacerResponseValidationError",
-      "PeopleApi",
-      "PetsApi",
-      "RequestManager",
-      "normalizeApiError",
-      "throwApiError",
-      "throwIfApiError",
-      "validateAdoptionFeesResponse",
-      "validateContractResponse",
-      "validatePerson",
-      "validatePersonCustomFieldsResponse",
-      "validatePersonListResponse",
-      "validatePet",
-      "validatePetCustomFieldsResponse",
-      "validatePetListResponse",
-    ] as const;
-
-    expect(Object.keys(sdk).sort()).toEqual([...runtimeExports].sort());
-    for (const exportName of runtimeExports) {
-      expect(sdk[exportName]).toEqual(expect.any(Function));
-    }
+      "SDK_VERSION",
+    ]);
   });
 
-  it("exports throwIfApiError from the public entrypoint", () => {
-    expect(() => sdk.throwIfApiError({ error: "Validation failed" })).toThrow(
-      sdk.PawPlacerApiError,
-    );
+  it("SDK_VERSION matches package.json", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    expect(sdk.SDK_VERSION).toBe(pkg.version);
   });
 });

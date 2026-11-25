@@ -1,33 +1,32 @@
-import { throwIfApiError } from "../errors";
 import {
-  assignPresentFields,
+  assignDefined,
   buildSearchParams,
+  isRecord,
   optionalNumber,
   optionalRecord,
   optionalString,
+  optionalStringArray,
   requireId,
   requireString,
 } from "../internal";
-import type { JsonRecord } from "../internal";
 import type { RequestManager } from "../request-manager";
-import type {
-  CreatePetOptions,
-  CreatePersonOptions,
-  CustomField,
-  Person,
-  PersonApplicationCreateInput,
-  PersonCreateInput,
-  PersonListParams,
-  PersonListResponse,
-  PersonType,
-  SurrenderPetCreateInput,
+import {
+  type CustomField,
+  PERSON_TYPES,
+  type Person,
+  type PersonApplicationCreateInput,
+  type PersonCreateInput,
+  type PersonListParams,
+  type PersonListResponse,
+  type PersonType,
+  type SurrenderPetCreateInput,
+  type WriteOptions,
 } from "../types";
 import {
   validatePerson,
   validatePersonCustomFieldsResponse,
   validatePersonListResponse,
 } from "../validation";
-import { applyPostOptions } from "./_post-options";
 import type { PetsApi } from "./pets";
 
 const UUID_PATTERN =
@@ -35,138 +34,19 @@ const UUID_PATTERN =
 const MAX_APPLICATION_PETS = 5;
 
 function assertPersonType(type: unknown): asserts type is PersonType {
-  if (
-    type !== "adopter" &&
-    type !== "foster" &&
-    type !== "surrender" &&
-    type !== "volunteer"
-  ) {
+  if (!PERSON_TYPES.includes(type as PersonType)) {
     throw new Error(
-      'Person type is required. Must be "adopter", "foster", "surrender", or "volunteer".',
+      `Person type is required. Must be one of: ${PERSON_TYPES.join(", ")}.`,
     );
   }
-}
-
-function surrenderPetCreateOptions(
-  options: CreatePersonOptions | undefined,
-  index: number,
-): CreatePetOptions | undefined {
-  if (!options) {
-    return undefined;
-  }
-
-  if (typeof options.idempotencyKey === "string") {
-    return {
-      idempotencyKey: `${options.idempotencyKey}:pet:${index}`,
-      retry: options.retry,
-    };
-  }
-
-  return {
-    idempotencyKey: options.idempotencyKey,
-    retry: options.retry,
-  };
-}
-
-function normalizeSurrenderPetLink(
-  item: SurrenderPetCreateInput,
-  index: number,
-): Record<string, unknown> {
-  if (!item || typeof item !== "object" || Array.isArray(item)) {
-    throw new Error(`Surrender pet at index ${index} must be an object`);
-  }
-
-  const payload: Record<string, unknown> = {};
-  const optionalStrings: Record<string, string | null | undefined> = {
-    pet_id: item.pet_id,
-    reason: item.reason,
-    urgency: item.urgency,
-    notes: item.notes,
-  };
-
-  for (const [key, value] of Object.entries(optionalStrings)) {
-    const normalized = optionalString(value, "Person", key);
-    if (normalized !== undefined) payload[key] = normalized;
-  }
-
-  if (item.custom_data != null) {
-    payload.custom_data = optionalRecord(
-      item.custom_data,
-      "Surrender pet",
-      "custom_data",
-    );
-  }
-
-  if (!payload.pet_id && item.create == null) {
-    throw new Error(
-      `Surrender pet at index ${index} must include pet_id or create`,
-    );
-  }
-  if (payload.pet_id && item.create != null) {
-    throw new Error(
-      `Surrender pet at index ${index} cannot include both pet_id and create`,
-    );
-  }
-
-  return payload;
-}
-
-async function resolveSurrenderPets(
-  petsApi: Pick<PetsApi, "create"> | undefined,
-  pets: SurrenderPetCreateInput[] | null | undefined,
-  options: CreatePersonOptions | undefined,
-): Promise<Record<string, unknown>[] | undefined> {
-  if (pets == null) {
-    return undefined;
-  }
-  if (!Array.isArray(pets)) {
-    throw new Error("Surrender pets must be an array");
-  }
-  if (pets.length === 0) {
-    throw new Error("Surrender pets must include at least one pet");
-  }
-
-  const normalized = pets.map((item, index) => ({
-    item,
-    link: normalizeSurrenderPetLink(item, index),
-    index,
-  }));
-  const needsPetCreation = normalized.some(({ item }) => item.create != null);
-  if (needsPetCreation && !petsApi) {
-    throw new Error(
-      "Creating surrender pets requires PawPlacerClient or a PetsApi instance",
-    );
-  }
-  const petCreator = petsApi;
-
-  const resolved: Record<string, unknown>[] = [];
-  for (const { item, link, index } of normalized) {
-    if (item.create != null) {
-      if (!petCreator) {
-        throw new Error(
-          "Creating surrender pets requires PawPlacerClient or a PetsApi instance",
-        );
-      }
-      const pet = await petCreator.create(
-        item.create,
-        surrenderPetCreateOptions(options, index),
-      );
-      link.pet_id = pet.id;
-    }
-    resolved.push(link);
-  }
-  return resolved;
 }
 
 function normalizeApplication(
-  application: PersonApplicationCreateInput | null | undefined,
+  application: PersonApplicationCreateInput,
   type: PersonType,
-  options?: CreatePersonOptions,
-): Record<string, unknown> | undefined {
-  if (application == null) {
-    return undefined;
-  }
-  if (typeof application !== "object" || Array.isArray(application)) {
+  options: WriteOptions | undefined,
+): Record<string, unknown> {
+  if (!isRecord(application)) {
     throw new Error("Person application must be an object");
   }
   if (type !== "adopter" && type !== "foster") {
@@ -174,17 +54,12 @@ function normalizeApplication(
       'Person application can only be provided when type is "adopter" or "foster"',
     );
   }
-  if (!Array.isArray(application.pet_ids)) {
+  const petIds = Array.isArray(application.pet_ids)
+    ? application.pet_ids.map((id) => (typeof id === "string" ? id.trim() : ""))
+    : null;
+  if (!petIds || petIds.some((id) => !UUID_PATTERN.test(id))) {
     throw new Error("Person application pet_ids must be an array of UUIDs");
   }
-
-  const petIds = application.pet_ids.map((petId) => {
-    if (typeof petId !== "string" || !UUID_PATTERN.test(petId.trim())) {
-      throw new Error("Person application pet_ids must be an array of UUIDs");
-    }
-    return petId.trim();
-  });
-
   if (petIds.length === 0) {
     throw new Error("Person application must include at least one pet_id");
   }
@@ -199,20 +74,87 @@ function normalizeApplication(
   if (application.terms_accepted !== true) {
     throw new Error("Person application terms_accepted must be true");
   }
-  if (options?.idempotencyKey === false) {
+  // The API stores applications under a UUID idempotency key.
+  const key = options?.idempotencyKey;
+  if (key === false) {
     throw new Error("Person applications require an idempotency key");
   }
-  if (
-    typeof options?.idempotencyKey === "string" &&
-    !UUID_PATTERN.test(options.idempotencyKey)
-  ) {
+  if (typeof key === "string" && !UUID_PATTERN.test(key)) {
     throw new Error("Person application idempotencyKey must be a UUID");
   }
-
-  return {
+  const result: Record<string, unknown> = {
     pet_ids: petIds,
     terms_accepted: true,
   };
+  assignDefined(result, {
+    template_id: optionalString(
+      application.template_id,
+      "Person application",
+      "template_id",
+    ),
+    external_user_id: optionalString(
+      application.external_user_id,
+      "Person application",
+      "external_user_id",
+    ),
+  });
+  return result;
+}
+
+function normalizeSurrenderPet(
+  item: SurrenderPetCreateInput,
+  index: number,
+): Record<string, unknown> {
+  const label = `Surrender pet at index ${index}`;
+  if (!isRecord(item)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const link: Record<string, unknown> = {};
+  assignDefined(link, {
+    pet_id: optionalString(item.pet_id, label, "pet_id"),
+    reason: optionalString(item.reason, label, "reason"),
+    urgency: optionalString(item.urgency, label, "urgency"),
+    notes: optionalString(item.notes, label, "notes"),
+    custom_data: optionalRecord(item.custom_data, label, "custom_data"),
+  });
+  if (!link.pet_id && item.create == null) {
+    throw new Error(`${label} must include pet_id or create`);
+  }
+  if (link.pet_id && item.create != null) {
+    throw new Error(`${label} cannot include both pet_id and create`);
+  }
+  return link;
+}
+
+/**
+ * Validates every surrender pet link first, then creates any new pets, so a
+ * bad entry fails before anything is written.
+ */
+async function resolveSurrenderPets(
+  pets: SurrenderPetCreateInput[],
+  petsApi: Pick<PetsApi, "create"> | undefined,
+  options: WriteOptions | undefined,
+): Promise<Record<string, unknown>[]> {
+  if (!Array.isArray(pets) || pets.length === 0) {
+    throw new Error("Surrender pets must be a non-empty array");
+  }
+  const links = pets.map(normalizeSurrenderPet);
+  if (pets.some((item) => item.create != null) && !petsApi) {
+    throw new Error("Creating surrender pets requires a PetsApi instance");
+  }
+  for (const [index, item] of pets.entries()) {
+    if (item.create == null || !petsApi) continue;
+    const pet = await petsApi.create(item.create, {
+      ...options,
+      // Derive a per-pet key so replaying the surrender replays each pet create.
+      idempotencyKey:
+        typeof options?.idempotencyKey === "string"
+          ? `${options.idempotencyKey}:pet:${index}`
+          : options?.idempotencyKey,
+    });
+    links[index].pet_id = pet.id;
+  }
+  return links;
 }
 
 export class PeopleApi {
@@ -221,16 +163,29 @@ export class PeopleApi {
     private petsApi?: Pick<PetsApi, "create">,
   ) {}
 
-  /** List adopters, fosters, surrenders, or volunteers. `type` is required in params. */
+  /** List adopters, fosters, surrenders, or volunteers. `type` is required. */
   async list(params: PersonListParams): Promise<PersonListResponse> {
     assertPersonType(params?.type);
     const searchParams = buildSearchParams(params);
-    const response = await this.requests.get<JsonRecord>("api/people", {
+    const response = await this.requests.get("api/people", {
       searchParams,
-      memoize: { key: `people:list:${searchParams.toString()}` },
+      cacheKey: `people:list:${searchParams}`,
     });
-    throwIfApiError(response);
     return validatePersonListResponse(response);
+  }
+
+  /** Iterate every person matching `params`, fetching pages as needed. */
+  async *listAll(
+    params: Omit<PersonListParams, "offset">,
+  ): AsyncGenerator<Person> {
+    const limit = params?.limit ?? 100;
+    let offset = 0;
+    while (true) {
+      const page = await this.list({ ...params, limit, offset });
+      yield* page.data;
+      if (!page.hasMore || page.data.length === 0) return;
+      offset += page.data.length;
+    }
   }
 
   /** Fetch a single adopter, foster, surrender, or volunteer by ID. */
@@ -239,58 +194,50 @@ export class PeopleApi {
     type: PersonType,
     options?: { forceRefresh?: boolean },
   ): Promise<Person> {
-    const trimmedId = requireId(id, "Person");
+    const personId = requireId(id, "Person");
     assertPersonType(type);
-    const response = await this.requests.get<JsonRecord>(
-      `api/people/${trimmedId}`,
+    const response = await this.requests.get(
+      `api/people/${encodeURIComponent(personId)}`,
       {
         searchParams: new URLSearchParams({ type }),
-        memoize: {
-          key: `people:get:${type}:${trimmedId}`,
-          staleWhileRevalidateMs: 30 * 60 * 1000,
-          forceRefresh: options?.forceRefresh,
-        },
+        cacheKey: `people:get:${type}:${personId}`,
+        forceRefresh: options?.forceRefresh,
       },
     );
-    throwIfApiError(response);
     return validatePerson(response);
   }
 
-  /** Alias for `get`. */
-  async getById(
-    id: string,
-    type: PersonType,
-    options?: { forceRefresh?: boolean },
-  ): Promise<Person> {
-    return this.get(id, type, options);
-  }
-
-  /** Convenience method that returns a plain `Person[]` array. Defaults to 10 results. */
-  async findMany(params: PersonListParams, limit?: number): Promise<Person[]> {
-    const result = await this.list({
-      ...params,
-      limit: limit ?? params?.limit ?? 10,
-      offset: params?.offset ?? 0,
-    });
-    return result.data;
-  }
-
-  /** Create a new adopter, foster, surrender, or volunteer. Sends an idempotency key by default. */
+  /**
+   * Create an adopter, foster, surrender, or volunteer. Sends an idempotency
+   * key by default so retries are safe.
+   *
+   * - `application` (adopter/foster) submits a pending application for 1-5 pets.
+   * - `pets` (surrender) links existing pets or creates new ones first.
+   */
   async create(
     data: PersonCreateInput,
-    options?: CreatePersonOptions,
+    options?: WriteOptions,
   ): Promise<Person> {
-    if (!data || typeof data !== "object") {
-      throw new Error("Create payload is required");
+    if (!isRecord(data)) {
+      throw new Error("Person create payload must be an object");
     }
     assertPersonType(data.type);
+    if (data.application != null && data.pets != null) {
+      throw new Error(
+        "Person application and surrender pets cannot be provided together",
+      );
+    }
+    if (data.pets != null && data.type !== "surrender") {
+      throw new Error(
+        'Person pets can only be provided when type is "surrender"',
+      );
+    }
 
-    const payload: Record<string, unknown> = {
+    const json: Record<string, unknown> = {
       type: data.type,
       name: requireString(data.name, "Person", "name"),
     };
-
-    assignPresentFields(payload, {
+    assignDefined(json, {
       email: optionalString(data.email, "Person", "email"),
       phone: optionalString(data.phone, "Person", "phone"),
       address: optionalString(data.address, "Person", "address"),
@@ -301,63 +248,43 @@ export class PeopleApi {
         "custom_field_data",
       ),
       capacity: optionalNumber(data.capacity, "Person", "capacity"),
+      skills: optionalStringArray(data.skills, "Person", "skills"),
+      interests: optionalStringArray(data.interests, "Person", "interests"),
+      preferred_roles: optionalStringArray(
+        data.preferred_roles,
+        "Person",
+        "preferred_roles",
+      ),
+      languages: optionalStringArray(data.languages, "Person", "languages"),
+      application:
+        data.application != null
+          ? normalizeApplication(data.application, data.type, options)
+          : undefined,
+      pets:
+        data.pets != null
+          ? await resolveSurrenderPets(data.pets, this.petsApi, options)
+          : undefined,
     });
-    if (data.application != null && data.pets != null) {
-      throw new Error(
-        "Person application and surrender pets cannot be provided together",
-      );
-    }
-    const application = normalizeApplication(
-      data.application,
-      data.type,
-      options,
-    );
-    if (data.pets != null && data.type !== "surrender") {
-      throw new Error(
-        'Person pets can only be provided when type is "surrender"',
-      );
-    }
-    const surrenderPets = await resolveSurrenderPets(
-      this.petsApi,
-      data.pets,
-      options,
-    );
-    if (surrenderPets) {
-      payload.pets = surrenderPets;
-    }
-    if (application) {
-      payload.application = application;
-    }
 
-    const headers: Record<string, string> = {};
-    const requestOptions: Record<string, unknown> = { json: payload, headers };
-    applyPostOptions(headers, requestOptions, options);
-    // type is sent in both the body (resource field) and query (routing).
-    requestOptions.searchParams = new URLSearchParams({ type: data.type });
-
-    const person = await this.requests.post<JsonRecord>(
-      "api/people",
-      requestOptions,
+    const person = validatePerson(
+      await this.requests.post("api/people", {
+        json,
+        // `type` is also sent as a query param for routing.
+        searchParams: new URLSearchParams({ type: data.type }),
+        ...options,
+      }),
     );
-    throwIfApiError(person);
-    this.requests.invalidateMatching("people:list:");
-    return validatePerson(person);
+    this.requests.invalidate("people:list:");
+    return person;
   }
 
-  /** Fetch the custom field definitions for adopter, foster, surrender, or volunteer forms. */
+  /** Fetch the custom field definitions for a person type's forms. */
   async getCustomFields(type: PersonType): Promise<CustomField[]> {
     assertPersonType(type);
-    const response = await this.requests.get<JsonRecord>(
-      "api/people/custom-fields",
-      {
-        searchParams: new URLSearchParams({ type }),
-        memoize: {
-          key: `people:custom-fields:${type}`,
-          refreshFrequencyMinutes: 15,
-        },
-      },
-    );
-    throwIfApiError(response);
+    const response = await this.requests.get("api/people/custom-fields", {
+      searchParams: new URLSearchParams({ type }),
+      cacheKey: `people:custom-fields:${type}`,
+    });
     return validatePersonCustomFieldsResponse(response).custom_fields;
   }
 }
